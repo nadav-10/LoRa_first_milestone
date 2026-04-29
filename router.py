@@ -24,6 +24,36 @@ server_stats = {
 # Messages waiting to be sent over the LoRa radio
 lora_out_queue = queue.PriorityQueue()
 
+def serialize_lora_message(msg_data):
+    """
+    הופך הודעת JSON מה-API לרצף בייטים (Binary) עבור ה-LoRa.
+    מטפל גם ב-Plain (kind 5) וגם ב-Text מוצפן (kind 3).
+    """
+    try:
+        if 'crypt2_b64' in msg_data:
+            kind = 0x03
+            payload_b64 = msg_data['crypt2_b64']
+        else:
+            kind = 0x05
+            payload_b64 = msg_data['plain2_b64']
+
+        payload_bytes = base64.b64decode(payload_b64)
+
+        # AE (1 byte), Kind (1 byte), UTime (4 bytes), Sender (4 bytes), To (4 bytes)
+        header = struct.pack('!BBIII', 
+                             0xAE, 
+                             kind, 
+                             int(msg_data.get('utime', time.time())), 
+                             msg_data['sender'], 
+                             msg_data['to'])
+
+        print("sent: " + header + payload_bytes)
+        lora_out_queue.put((2, header + payload_bytes))
+        return True
+    except Exception as e:
+        print(f"Error serializing message: {e}")
+        return False
+
 def route_message(msg_data : dict):
     """
     Routes a message based on the 'to' key_id.
@@ -43,7 +73,8 @@ def route_message(msg_data : dict):
         return "local"
     else:
         # REMOTE ROUTE: Put in LoRa Priority Queue
-        lora_out_queue.put((2, msg_data))
+        if not serialize_lora_message(msg_data):
+            return "error"
         return "remote"
 
 @app.route('/text', methods=['POST'])
