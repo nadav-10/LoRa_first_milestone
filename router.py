@@ -12,7 +12,7 @@ app = Flask(__name__)
 # value: dictionary with key_id, nick, name, phone, delay_secs, is_local
 users_registry = {}
 message_inbox = {}
-
+#ניסיון
 #all stats for /stats endpoint
 server_stats = {
     "local_messages_sent": 0,
