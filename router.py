@@ -4,6 +4,7 @@ import time
 import base64, threading, random
 import struct
 import queue
+import hashlib
 
 app = Flask(__name__)
 
@@ -12,6 +13,9 @@ app = Flask(__name__)
 # value: dictionary with key_id, nick, name, phone, delay_secs, is_local
 users_registry = {}
 message_inbox = {}
+next_publish = {}; next_details = {}
+messages_sent : set = {}
+messages_sent_history : list = []
 
 #all stats for /stats endpoint
 server_stats = {
@@ -46,13 +50,58 @@ def serialize_lora_message(msg_data):
                              int(msg_data.get('utime', time.time())), 
                              msg_data['sender'], 
                              msg_data['to'])
+        
+        prio = 2
+
+        hash_msg = hashlib.sha256((header + payload_bytes)).hexdigest()
+        if hash_msg in messages_sent:
+            if random.random() > 0.1:
+                print("priodic forwarding")
+                return False
+            prio = 4
+        else:
+            messages_sent.add(hash_msg)
+            messages_sent_history.append(hash_msg)
+            if len(messages_sent) > 2000:
+                while len(messages_sent_history) > 500:
+                    oldest_message = messages_sent_history.pop(0)
+                    messages_sent.remove(oldest_message)
 
         print("sent: " + header + payload_bytes)
-        lora_out_queue.put((2, header + payload_bytes))
+        lora_out_queue.put((prio, header + payload_bytes))
         return True
     except Exception as e:
         print(f"Error serializing message: {e}")
         return False
+    
+
+def publish_user_details(user_data):
+    """
+    יוצר חבילת User Details בינארית ושולח ל-Worker.
+    user_data: dict שמכיל key_id, nick, name, phone
+    """
+    try:
+        # יצירת ה-Payload: חיבור השדות עם נקודה-פסיק
+        # nick;name;phone
+        details_str = f"{user_data.get('nick','')}:{user_data.get('name','')}:{user_data.get('phone','')}"
+        details_bytes = details_str.encode('utf-8')
+
+        # אריזה לפי הפורמט: AE, Kind(02), UTime, SenderID, ואז הטקסט
+        # פורמט struct: !BBII (AE, Kind, Time, Sender) ואז ה-bytes של הטקסט
+        header = struct.pack('!BBII', 
+                             0xAE, 
+                             0x02, 
+                             int(time.time()), 
+                             user_data['key_id'])
+        
+        full_packet = header + details_bytes
+        
+        # הכנסה לתור של ה-Worker (עדיפות 1 - ניהול רשת)
+        lora_out_queue.put((1, full_packet))
+        print(f"User Details for {user_data['key_id']} queued.")
+        
+    except Exception as e:
+        print(f"Error publishing user details: {e}")
 
 def route_message(msg_data : dict):
     """
@@ -151,9 +200,16 @@ def alive():
 
     server_stats["valid_alive_requests"] += 1
     
-    if random.random() < 0.1:
+    if key_id not in next_publish or time.time() > next_publish[key_id]:
         print("hello world for debug")
         publish_key(key_b64)
+        next_publish[key_id] = time.time() + 15 + random.randint(0, 10)
+
+    if key_id not in next_details or time.time() > next_details[key_id]:
+        print("hello world for debug")
+        publish_user_details(users_registry[key_id])
+        next_publish[key_id] = time.time() + 120 + random.randint(0, 60)
+
     return jsonify({
         "status": "OK",
         "messages": messages
