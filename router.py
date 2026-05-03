@@ -16,6 +16,8 @@ message_inbox = {}
 next_publish = {}; next_details = {}
 messages_sent : set = set([])
 messages_sent_history : list = []
+pending_keys = set()
+keys_lock = threading.Lock()
 
 #all stats for /stats endpoint
 server_stats = {
@@ -26,7 +28,13 @@ server_stats = {
 }
 
 # Messages waiting to be sent over the LoRa radio
-lora_out_queue = queue.PriorityQueue()
+# הגדרת התורים (כל אחד עם מקסימום גודל למניעת Starvation של זיכרון)
+queues = {
+    1: queue.Queue(maxsize=50),  # Key Publish (קריטי)
+    2: queue.Queue(maxsize=50),  # Text/Plain (חשוב)
+    4: queue.Queue(maxsize=50), # Forwarding (פחות חשוב)
+    5: queue.Queue(maxsize=30)   # User Details (הכי פחות דחוף)
+}
 
 def serialize_lora_message(msg_data):
     """
@@ -68,7 +76,7 @@ def serialize_lora_message(msg_data):
                     messages_sent.remove(oldest_message)
 
         print("sent: " + header + payload_bytes)
-        lora_out_queue.put((prio, header + payload_bytes))
+        queues[prio].put((time.time(), header + payload_bytes), block = False)
         return True
     except Exception as e:
         print(f"Error serializing message: {e}")
@@ -97,7 +105,7 @@ def publish_user_details(user_data):
         full_packet = header + details_bytes
         
         # הכנסה לתור של ה-Worker (עדיפות 1 - ניהול רשת)
-        lora_out_queue.put((1, full_packet))
+        queues[5].put((time.time(), full_packet), block = False)
         print(f"User Details for {user_data['key_id']} queued.")
         
     except Exception as e:
@@ -274,13 +282,40 @@ def publish_key(key_b64):
                              sender_key_id, 
                              key2)
         
-        lora_out_queue.put((1, packet)) #change later
+        with keys_lock:
+            if sender_key_id in pending_keys:
+                print(f"Key for {sender_key_id} already in queue. Skipping.")
+                return False
+        
+        queues[1].put((time.time(), packet, sender_key_id), block = False) #change later
+        # אם לא קיים, נוסיף אותו לסט וגם לתור
+        pending_keys.add(sender_key_id)
         print(f"Key Publish packet for ID {sender_key_id} added to queue.")
         return True
 
     except Exception as e:
         print(f"Failed to publish key: {e}")
         return False
+    
+
+def get_next_packet_wfq():
+    r = random.random()
+    # הסתברות לשירות תורים:
+    # 50% לעדיפות 1, 30% לעדיפות 2, 15% לעדיפות 4, 5% לעדיפות 5
+    if r < 0.50 and not queues[1].empty(): 
+        return 1, queues[1].get()
+    elif r < 0.80 and not queues[2].empty():
+        return 2, queues[2].get()
+    elif r < 0.95 and not queues[4].empty():
+        return 4, queues[4].get()
+    elif not queues[5].empty():
+        return 5, queues[5].get()
+    
+    for p in [1, 2, 4, 5]:
+        if not queues[p].empty():
+            return p, queues[p].get()
+        
+    return None
     
 
 def lora_worker(device_path):
@@ -294,19 +329,28 @@ def lora_worker(device_path):
 
             print("cat")
             while True:
-                priority, raw_bytes = lora_out_queue.get()
+                priority, item = get_next_packet_wfq()
                 print("worker got a message")
                 
-                if isinstance(raw_bytes, bytes):
+                if isinstance(item[1], bytes):
+                    raw_bytes = item[1]
+                    entry_time = item[0]
+                    if time.time() > entry_time + 500:
+                        print("to much time since enter")
+                        continue
                     modem.write_bytes(raw_bytes)
 
+                    if priority == 1:
+                        user_id = item[2] 
+                        with keys_lock:
+                            pending_keys.discard(user_id)
+
                     server_stats["global_messages_sent"] += 1
-                    print(f"Worker sent {len(raw_bytes)} bytes. Priority: {priority}")
+                    print(f"Worker sent {len(raw_bytes)} b  ytes. Priority: {priority}")
                 
                 else:
                     print("not byte exception")
 
-                lora_out_queue.task_done()
     except Exception as e:
         print(f"LoRa Worker crashed: {e}")
 
