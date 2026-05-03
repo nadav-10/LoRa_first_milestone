@@ -315,7 +315,7 @@ def get_next_packet_wfq():
         if not queues[p].empty():
             return p, queues[p].get()
         
-    return None
+    return None, (None, None)
     
 
 def lora_worker(device_path):
@@ -348,8 +348,11 @@ def lora_worker(device_path):
                     server_stats["global_messages_sent"] += 1
                     print(f"Worker sent {len(raw_bytes)} b  ytes. Priority: {priority}")
                 
-                else:
+                elif item[1] is not None:
                     print("not byte exception")
+                else:
+                    print("No messages")
+                    time.sleep(0.5)
 
     except Exception as e:
         print(f"LoRa Worker crashed: {e}")
