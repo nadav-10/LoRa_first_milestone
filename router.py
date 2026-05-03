@@ -14,7 +14,7 @@ app = Flask(__name__)
 users_registry = {}
 message_inbox = {}
 next_publish = {}; next_details = {}
-messages_sent : set = {}
+messages_sent : set = set([])
 messages_sent_history : list = []
 
 #all stats for /stats endpoint
@@ -208,7 +208,7 @@ def alive():
     if key_id not in next_details or time.time() > next_details[key_id]:
         print("hello world for debug")
         publish_user_details(users_registry[key_id])
-        next_publish[key_id] = time.time() + 120 + random.randint(0, 60)
+        next_details[key_id] = time.time() + 120 + random.randint(0, 60)
 
     return jsonify({
         "status": "OK",
