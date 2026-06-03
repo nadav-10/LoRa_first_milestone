@@ -11,25 +11,28 @@ import hashlib
 from first_lora_user.pubkey import RSA1024
 app = Flask(__name__)
 USER_EXPIRATION_SECONDS = 300
-KEY_PUBLISH_INTERVAL = 120
-USER_DETAILS_INTERVAL = 120
-KEY_PUBLISH_INTERVAL_OFFSET = 60
-USER_DETAILS_INTERVAL_OFFSET = 60
+KEY_PUBLISH_INTERVAL = 60
+USER_DETAILS_INTERVAL = 60
+KEY_PUBLISH_INTERVAL_OFFSET = 0
+USER_DETAILS_INTERVAL_OFFSET = 0
 QUEUE_MAX_SIZES = (50, 50, 50, 30)
 WFQ_PRIORITY_WEIGHTS = (0.5, 0.8, 0.95) #accumulative
 QUEUE_ENTRY_TTL = 300
+PERIODIC_KEY_CHANCE = 0.1
+PERIODIC_TEXT_CHANCE = 0.2
+PERIODIC_DETAILS_CHANCE = 0.1
 # users_registry stores the full object required by the /users endpoint
 # key: key_id (string), value: dictionary with key_id, nick, name, phone, delay_secs, is_local
 users_registry = {}
-users_lock = threading.Lock()
+users_lock = threading.RLock()
 
 #stores last time seen of each user
 last_seen = {}
-last_seen_lock = threading.Lock()
+last_seen_lock = threading.RLock()
 
 #stores all incoming messages to local users. key: key_id, value: list
 message_inbox = {}
-inbox_lock = threading.Lock()
+inbox_lock = threading.RLock()
 
 #All stats for /stats endpoint
 server_stats = {
@@ -38,11 +41,11 @@ server_stats = {
     "valid_alive_requests": 0,
     "users_requests_count": 0
 }
-stats_lock = threading.Lock()
+stats_lock = threading.RLock()
 
 # Stores user details for users we haven't seen a Public Key for yet. key: sender_id (int), value: {nick, name, phone, utime}
 cached_user_details = {}
-cached_details_lock = threading.Lock()
+cached_details_lock = threading.RLock()
 
 # Messages waiting to be sent over the LoRa radio
 #Every queue has a maximum length to prevent starvation 
@@ -56,7 +59,7 @@ lora_out_queues = {
 
 #All keys ready to be sent in LoRa, prevents re-entering a key publish
 pending_keys = set()
-pending_keys_lock = threading.Lock()
+pending_keys_lock = threading.RLock()
 
 #REST API BACKEND:
 class ServerBE:
@@ -104,15 +107,15 @@ class ServerBE:
         key_id = ServerBE.get_key_id_from_b64(key_b64)
         with stats_lock:
             server_stats["valid_alive_requests"] += 1
-
-        encrypted_info = base64.b64decode(data.get("info_b64"))
-        with users_lock:
-            users_registry[key_id] = {
-                "key_id": key_id,
-                "key_b64": key_b64,
-                "is_local": True      # This user is hitting our REST API directly
-            }
-        LoRaListener.register_user(key_id, encrypted_info, 0)
+        if "details_b64" in data:
+            encrypted_info = base64.b64decode(data["details_b64"])
+            with users_lock:
+                users_registry[key_id] = {
+                    "key_id": key_id,
+                    "key_b64": key_b64,
+                    "is_local": True      # This user is hitting our REST API directly
+                }
+            LoRaListener.register_user(key_id, encrypted_info, 0)
         with inbox_lock:
             message_inbox[key_id] = message_inbox.get(key_id, [])
         with last_seen_lock:
@@ -125,7 +128,6 @@ class ServerBE:
             print("hello world for debug")
             LoRaWriter.publish_user_details(key_id, encrypted_info)
             ServerBE.next_details[key_id] = time.time() + USER_DETAILS_INTERVAL + random.randint(0, USER_DETAILS_INTERVAL_OFFSET)
-
         # Retrieve messages for this specific user
         with inbox_lock:
             return message_inbox[key_id]
@@ -184,19 +186,16 @@ def alive():
     Updates user info and returns pending messages.
     """
     data = request.get_json()
-
     # key_b64 is the only mandatory field
-    if not data or 'key_b64' not in data or "info_b64" not in data:
+    if not data or 'key_b64' not in data:
         return jsonify({
             "status": "error",
             "error": "Invalid key_b64"
         }), 400
-
     key_b64 = data.get('key_b64')
     key_id = ServerBE.get_key_id_from_b64(key_b64)
     if key_id is None:
         return jsonify({"status": "error", "error": "Malformed key_b64"}), 400
-
     #handle all operations related to /alive endpoint
     messages = ServerBE.handle_alive_calls(data)
     return jsonify({
@@ -237,14 +236,25 @@ def get_stats():
 #MESSAGE RECEPTION CODE
 class LoRaListener:
     """Endlessly reads all incoming messages and manages them"""
+    text_forwarding_counter = {}
     @staticmethod
-    def register_user(user_id, details, delay):
+    def periodic_text_forwarding(packet : bytes, sender : bytes, to : bytes, crypt : bytes):
+        hashed_text = hashlib.sha256((sender, to, crypt))
+        LoRaListener.text_forwarding_counter[hashed_text] = LoRaListener.text_forwarding_counter.get(hashed_text, default = -1) + 1
+        if random.random() < PERIODIC_TEXT_CHANCE ** LoRaListener.text_forwarding_counter[hashed_text]:
+            lora_out_queues[3].put(int(time.time()), packet)
+
+    @staticmethod
+    def register_user(user_id : int, details : bytes, delay : int):
         with users_lock:
             key_b64 = users_registry[user_id]["key_b64"]
         
 
         my_public_rsa_key = RSA1024.from_public_bytes(base64.b64decode(key_b64))
-        info = my_public_rsa_key.encrypt(details)[1:].decode('utf-8')
+        info = my_public_rsa_key.encrypt(details)
+        if info[0] == 0x00:
+            return
+        info = info[1:].decode("utf-8")
         parts = info.split(':') if info else ["", "", ""]
         if len(parts) != 3:
             print(f"[ERROR] Malformed user details string: '{info}'")
@@ -288,6 +298,7 @@ class LoRaListener:
                         "delay_secs": delay,
                         "is_local": False 
                     }
+                    lora_out_queues[3].put((int(packet[2:6]), packet))
                     print(f"[DEBUG] Registered new remote user: {sender_id}")
                     with cached_details_lock:
                         if sender_id in cached_user_details:
@@ -296,6 +307,8 @@ class LoRaListener:
                             print(f"[DEBUG] Applied cached details to new user {sender_id}")
                 else:
                     users_registry[sender_id]["delay_secs"] = delay
+                    if random.random < PERIODIC_KEY_CHANCE:
+                        lora_out_queues[3].put((int(time.time()), packet))
                     
         except Exception as e:
             print(f"[ERROR] Unexpected error parsing Key Publish: {e}")
@@ -320,6 +333,7 @@ class LoRaListener:
                 "sender": sender_id,
                 "to": to_id,
             }
+            LoRaListener.periodic_text_forwarding(packet, sender_id, to_id, payload_bytes)
 
             if kind == 0x03:
                 msg_data["crypt2_b64"] = payload_b64
@@ -346,14 +360,18 @@ class LoRaListener:
 
             utime, sender_id = struct.unpack("!II", packet[2:10])
         
-            # Payload starts after the 13-byte header (or 14 if including retransmission/hop)
-            # Based on your previous struct.unpack("!BIII", packet[1:14]), header ends at 14
-            payload_bytes = packet[14:]
+            # Payload starts after the 10-byte header
+            payload_bytes = packet[10:]
 
             with users_lock:
                 if sender_id in users_registry:
+                    if [users_registry[sender_id].get(field, "") for field in ["nick", "name", "phone"]] == ["", "", ""]:
+                        lora_out_queues[3].put((int(time.time()), packet))
+                    elif random.random() < PERIODIC_DETAILS_CHANCE:
+                            lora_out_queues[3].put((int(time.time()), packet))
                     LoRaListener.register_user(sender_id, payload_bytes, int(time.time() - utime))
                 else:
+                    lora_out_queues[3].put((time.time(), packet))
                     # User unknown, cache details in the "Waiting Room"
                     with cached_details_lock:
                         cached_user_details[sender_id] = (payload_bytes, int(time.time() - utime))

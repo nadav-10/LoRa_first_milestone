@@ -1,0 +1,11 @@
+{
+  "nickname": "catdav",
+  "fullname": "catdav",
+  "phone": "",
+  "private_key": "-----BEGIN RSA PRIVATE KEY-----\nMIICXAIBAAKBgQDG1w8xQWJnFnf3rGP1kWAxwhxZ7lzRDuPLp8hX0gZJIdQP/sHF\npbtSH0fiNyRRhah1Wi0i09C9+o7VwkZXG+EGwuCHHpnsWD0ZDfaar0ON7X+wgVMp\n3LTr1knTs11QPNrDTfoQQFXXsaBcW9sRiOq7bE2uscSiSjCh5AsR/SZnwQIDAQAB\nAoGAX+MN3H7faT8Yk0N64M0+SkCFU4jzEY3QpEFBB7isd0/s59m+sAWAE9Yp4Bkf\nVoDR/+WApq7mlvbhMowBR7iWBsb7jbiEm9uKaWepAhHD/5eF6YXbT5HGgi40V/Ll\ntxqqdOrFBuFZhd6IIajkfXwxpxqCfUHEvOg/NAwFf9YwGNECQQDbbDProrW/eCkT\neWU05rJOC0+upkRUSYd9TeK5dFjfsJ5YcANNj+1uUp3prjJpbYcjhQz/VZ/f2Yyv\nUJ+oiCuXAkEA5/yAI33WErVHtBg7xhEog6Rz6LOG+mOmBMDr9dBj3yUHRRmrsZyL\nnodRoqE0RGaYE/UOJBR9631QR3nXGZ3SZwJAd6FHsXn1o12M75wpDK2WmyxZljv6\nVwX7w9p5+Wiwp8ywmEEB3ADTj2mlxOj/fTGFE12QF4oEb1Q5+r93PLh5IwJAOhEF\nsdyJfN1LOVTngUhCL9E2AgUNwBa5M29moHyswunty+oFA8v/VorgcCiRgJ19a2Fn\nTLikXBFdysZAhPTv+QJBAIFfsQVtw6Z0UYw8VyQ10I3Fzzk/sIMnFLatCDUEpVTp\nNz1g8ABLTUAOuFKWn+ulRB4vkB2IBO11Y/AA4LwhQ3w=\n-----END RSA PRIVATE KEY-----",
+  "messages": [],
+  "last_seq": {
+    "3554839085": 3,
+    "2863112021": 4
+  }
+}
