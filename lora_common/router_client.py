@@ -15,7 +15,7 @@ import hashlib
 sys.path.append(os.path.join(os.path.dirname(__file__), 'lora_common'))
 from pubkey import RSA1024
 
-ROUTER_URL = "http://localhost:8080"
+ROUTER_URL = "http://localhost:8200"
 COORDINATOR_URL = "http://34.165.8.95:8080"  # Franji's Google cloud node 2025-04-16
 # use http://34.165.8.95:8080/coordinator_stats to check stats
 
@@ -96,7 +96,7 @@ def read_line(user : UserState):
         print(text)
         splt_text = text.split('#')
         if len(splt_text) == 1: splt_text = (None, splt_text[0])
-        user.messages_to_send.put((splt_text[0], splt_text[1]))
+        user.messages_to_send.put((int(splt_text[0]), splt_text[1]))
         time.sleep(2.5)
 
 class Simulator:
@@ -174,13 +174,11 @@ class Simulator:
                     if lu.key_id not in received_key_ids:
                      #   print(f"\n[WARNING] Local user {lu.nickname} ({lu.key_id}) is NOT reported by router /users API.", flush=True)
                         pass
-
                 has_remote = any(uid not in simulated_local_ids for uid in received_key_ids)
                 if users and not has_remote:
                     if self.verbose:
                    #     print("\n[INFO] Only local users found in /users. No remote routers/users discovered yet.", flush=True)
                         pass
-
                 for u in users:
                     kid = u['key_id']
                     self.remote_users[kid] = u
@@ -226,8 +224,8 @@ class Simulator:
 
     def send_text(self, sender_user, to_key_id, text, report=False, mid=None):
         print("Has tex")
+        print(to_key_id.__class__)
         target_info = self.remote_users.get(to_key_id)
-        print(target_info)
         if not target_info and not self.plain_text:
             print("here is the bug line 230")
             return False
