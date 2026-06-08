@@ -5,18 +5,18 @@ import struct
 import queue
 import threading
 import random
-from first_lora_user.loramodem import LoRaModem
+from lora_common.loramodem import LoRaModem
 import argparse
 import hashlib
-from first_lora_user.pubkey import RSA1024
+from lora_common.pubkey import RSA1024
 app = Flask(__name__)
 USER_EXPIRATION_SECONDS = 300
-KEY_PUBLISH_INTERVAL = 60
-USER_DETAILS_INTERVAL = 60
-KEY_PUBLISH_INTERVAL_OFFSET = 0
-USER_DETAILS_INTERVAL_OFFSET = 0
+KEY_PUBLISH_INTERVAL = 90
+USER_DETAILS_INTERVAL = 90
+KEY_PUBLISH_INTERVAL_OFFSET = 60
+USER_DETAILS_INTERVAL_OFFSET = 60
 QUEUE_MAX_SIZES = (50, 50, 50, 30)
-WFQ_PRIORITY_WEIGHTS = (0.5, 0.8, 0.95) #accumulative
+WFQ_PRIORITY_WEIGHTS = (0.5, 0.8, 0.95, 1) #accumulative
 QUEUE_ENTRY_TTL = 300
 PERIODIC_KEY_CHANCE = 0.1
 PERIODIC_TEXT_CHANCE = 0.2
@@ -52,14 +52,19 @@ cached_details_lock = threading.RLock()
 # - too many messages stockpiling in one queue, making newer messages delayed
 lora_out_queues = {
     1: queue.Queue(maxsize=QUEUE_MAX_SIZES[0]),  # Key Publish (Critical)
-    2: queue.Queue(maxsize=50),  # Text/Plain (Important)
-    3: queue.Queue(maxsize=50), # Forwarding (Less important)
-    4: queue.Queue(maxsize=30)   # User Details + Key Republish (Least urgent)
+    2: queue.Queue(maxsize=QUEUE_MAX_SIZES[1]),  # Text/Plain (Important)
+    3: queue.Queue(maxsize=QUEUE_MAX_SIZES[2]), # Forwarding (Less important)
+    4: queue.Queue(maxsize=QUEUE_MAX_SIZES[3])   # User Details + Key Republish (Least urgent)
 }
 
 #All keys ready to be sent in LoRa, prevents re-entering a key publish
 pending_keys = set()
 pending_keys_lock = threading.RLock()
+
+#Time of next publish for each key_id, to prevent over-publishing
+next_lock = threading.RLock()    
+next_publish = {}
+next_details = {}
 
 #REST API BACKEND:
 class ServerBE:
@@ -98,8 +103,6 @@ class ServerBE:
         except Exception:
             return None
         
-    next_publish = {}
-    next_details = {}
     @staticmethod
     def handle_alive_calls(data : dict) -> list[dict]:
         """Handles all operations to be executed by /alive call"""
@@ -107,27 +110,32 @@ class ServerBE:
         key_id = ServerBE.get_key_id_from_b64(key_b64)
         with stats_lock:
             server_stats["valid_alive_requests"] += 1
+        with inbox_lock:
+            message_inbox[key_id] = message_inbox.get(key_id, [])
+        with last_seen_lock:
+            last_seen[key_id] = time.time()
+        with next_lock:
+            if key_id not in next_publish or time.time() > next_publish[key_id]:
+                print(f"[DEBUG] publishing {key_id}'s key")
+                LoRaWriter.publish_key(key_b64, 1 if key_id not in next_publish else 4)
+                next_publish[key_id] = time.time() + KEY_PUBLISH_INTERVAL + random.randint(0, KEY_PUBLISH_INTERVAL_OFFSET)
+
         if "details_b64" in data:
             encrypted_info = base64.b64decode(data["details_b64"])
             with users_lock:
                 users_registry[key_id] = {
                     "key_id": key_id,
                     "key_b64": key_b64,
-                    "is_local": True      # This user is hitting our REST API directly
+                    "is_local": True,      # This user is hitting our REST API directly
+                    "delay_secs": 0,       # No delay for local users
                 }
-            LoRaListener.register_user(key_id, encrypted_info, 0)
-        with inbox_lock:
-            message_inbox[key_id] = message_inbox.get(key_id, [])
-        with last_seen_lock:
-            last_seen[key_id] = time.time()
-        if key_id not in ServerBE.next_publish or time.time() > ServerBE.next_publish[key_id]:
-            print(f"[DEBUG] publishing {key_id}'s key")
-            LoRaWriter.publish_key(key_b64, 1 if key_id not in ServerBE.next_publish else 4)
-            ServerBE.next_publish[key_id] = time.time() + KEY_PUBLISH_INTERVAL + random.randint(0, KEY_PUBLISH_INTERVAL_OFFSET)
-        if key_id not in ServerBE.next_details or time.time() > ServerBE.next_details[key_id]:
-            print("hello world for debug")
-            LoRaWriter.publish_user_details(key_id, encrypted_info)
-            ServerBE.next_details[key_id] = time.time() + USER_DETAILS_INTERVAL + random.randint(0, USER_DETAILS_INTERVAL_OFFSET)
+            LoRaListener.register_user(key_id, encrypted_info)
+            with next_lock:
+                if key_id not in next_details or time.time() > next_details[key_id]:
+                    print(f"[DEBUG] publishing user details for {key_id}")
+                    LoRaWriter.publish_user_details(key_id, encrypted_info)
+                    next_details[key_id] = time.time() + USER_DETAILS_INTERVAL + random.randint(0, USER_DETAILS_INTERVAL_OFFSET)
+
         # Retrieve messages for this specific user
         with inbox_lock:
             return message_inbox[key_id]
@@ -149,12 +157,17 @@ class ServerBE:
                         expired_ids.append(key_id)
 
                 # Prune the data
-                with users_lock, inbox_lock:
+                with users_lock, inbox_lock, cached_details_lock, pending_keys_lock, next_lock:
                     for key_id in expired_ids:
                         print(f"[DEBUG] Pruning inactive user {key_id}")
                         users_registry.pop(key_id, None)
                         message_inbox.pop(key_id, None)
                         last_seen.pop(key_id, None)
+                        cached_user_details.pop(key_id, None)
+                        pending_keys.discard(key_id)
+                        next_publish.pop(key_id, None)
+                        next_details.pop(key_id, None)
+
         except Exception as e:
             print(f"[ERROR] Unexpected error cleaning inactive users: {e}")
 
@@ -238,14 +251,13 @@ class LoRaListener:
     """Endlessly reads all incoming messages and manages them"""
     text_forwarding_counter = {}
     @staticmethod
-    def periodic_text_forwarding(packet : bytes, sender : bytes, to : bytes, crypt : bytes):
-        hashed_text = hashlib.sha256((sender, to, crypt))
-        LoRaListener.text_forwarding_counter[hashed_text] = LoRaListener.text_forwarding_counter.get(hashed_text, default = -1) + 1
+    def periodic_text_forwarding(packet : bytes, hashed_text : str):
+        LoRaListener.text_forwarding_counter[hashed_text] = LoRaListener.text_forwarding_counter.get(hashed_text, -1) + 1
         if random.random() < PERIODIC_TEXT_CHANCE ** LoRaListener.text_forwarding_counter[hashed_text]:
-            lora_out_queues[3].put(int(time.time()), packet)
+            LoRaWriter.put_in_queue(3, packet)
 
     @staticmethod
-    def register_user(user_id : int, details : bytes, delay : int):
+    def register_user(user_id : int, details : bytes):
         with users_lock:
             key_b64 = users_registry[user_id]["key_b64"]
         
@@ -264,7 +276,6 @@ class LoRaListener:
             "nick": parts[0],
             "name": parts[1],
             "phone": parts[2],
-            "delay_secs": max(0, delay)
         }
 
         with users_lock:
@@ -298,17 +309,26 @@ class LoRaListener:
                         "delay_secs": delay,
                         "is_local": False 
                     }
-                    lora_out_queues[3].put((int(packet[2:6]), packet))
+                    with pending_keys_lock:
+                        if sender_id in pending_keys:
+                            print(f"[DEBUG] Periodic key forwarding for {sender_id} already in queue. Skipping.")
+                        else:
+                            LoRaWriter.put_in_queue(3, packet)
+                            pending_keys.add(sender_id)
                     print(f"[DEBUG] Registered new remote user: {sender_id}")
                     with cached_details_lock:
                         if sender_id in cached_user_details:
                             cached_data, delay = cached_user_details.pop(sender_id)
-                            LoRaListener.register_user(sender_id, cached_data, delay)
+                            LoRaListener.register_user(sender_id, cached_data)
                             print(f"[DEBUG] Applied cached details to new user {sender_id}")
                 else:
                     users_registry[sender_id]["delay_secs"] = delay
-                    if random.random < PERIODIC_KEY_CHANCE:
-                        lora_out_queues[3].put((int(time.time()), packet))
+                    if random.random() < PERIODIC_KEY_CHANCE:
+                        if sender_id in pending_keys:
+                            print(f"[DEBUG] Periodic key forwarding for {sender_id} already in queue. Skipping.")
+                        else:
+                            LoRaWriter.put_in_queue(3, packet)
+                            pending_keys.add(sender_id)
                     
         except Exception as e:
             print(f"[ERROR] Unexpected error parsing Key Publish: {e}")
@@ -333,7 +353,13 @@ class LoRaListener:
                 "sender": sender_id,
                 "to": to_id,
             }
-            LoRaListener.periodic_text_forwarding(packet, sender_id, to_id, payload_bytes)
+            hashed_text = hashlib.sha256(bytes(sender_id) + bytes(to_id) + payload_bytes).hexdigest()
+            if hashed_text not in LoRaListener.text_forwarding_counter:
+                delay = max(0, int(time.time() - utime))
+                with users_lock:
+                    if sender_id in users_registry:
+                        users_registry[sender_id]["delay_secs"] = delay
+            LoRaListener.periodic_text_forwarding(packet, hashed_text)
 
             if kind == 0x03:
                 msg_data["crypt2_b64"] = payload_b64
@@ -363,18 +389,18 @@ class LoRaListener:
             # Payload starts after the 10-byte header
             payload_bytes = packet[10:]
 
-            with users_lock:
+            with users_lock, cached_details_lock:
                 if sender_id in users_registry:
                     if [users_registry[sender_id].get(field, "") for field in ["nick", "name", "phone"]] == ["", "", ""]:
-                        lora_out_queues[3].put((int(time.time()), packet))
+                        LoRaWriter.put_in_queue(3, packet)
                     elif random.random() < PERIODIC_DETAILS_CHANCE:
-                            lora_out_queues[3].put((int(time.time()), packet))
-                    LoRaListener.register_user(sender_id, payload_bytes, int(time.time() - utime))
+                        LoRaWriter.put_in_queue(3, packet)
+                    LoRaListener.register_user(sender_id, payload_bytes)
                 else:
-                    lora_out_queues[3].put((time.time(), packet))
+                    if sender_id not in cached_user_details:
+                        LoRaWriter.put_in_queue(3, packet)
                     # User unknown, cache details in the "Waiting Room"
-                    with cached_details_lock:
-                        cached_user_details[sender_id] = (payload_bytes, int(time.time() - utime))
+                    cached_user_details[sender_id] = (payload_bytes, int(time.time() - utime))
                     print(f"[DEBUG] Cached details for unknown user {sender_id}")
         except Exception as e:
             print(f"[ERROR] Unexpected error parsing incoming user details: {e}")
@@ -393,8 +419,8 @@ class LoRaListener:
             if len(packet) < 10 or packet[0] != 0xAE:
                 print("[ERROR] packet doesnt start with ae / packet is too short")
                 return
-
             kind = packet[1]
+            print(f"[DEBUG] Listener received potential message of kind {kind}")
             if kind == 0x01:  # Key publish
                 LoRaListener.handle_incoming_key_publish(packet)
             elif kind in [0x03, 0x05]:
@@ -404,7 +430,7 @@ class LoRaListener:
             else:
                 print(f"[ERROR] packet kind isn't legal (1, 2, 3, 5) and instead {kind}")
                 return
-            sender_id = struct.unpack("!I", packet[6:10])
+            sender_id = struct.unpack("!I", packet[6:10])[0]
             with last_seen_lock:
                 last_seen[sender_id] = time.time()
         except Exception as e:
@@ -422,6 +448,35 @@ class LoRaListener:
 
 class LoRaWriter:
     """Handles inserting packets into the queue and sending the queue's elements"""
+
+    @staticmethod
+    def put_in_queue(priority : int, packet : bytes):
+        """
+        Puts a raw bytes packet in the relevant queue based on priority.
+        """
+        while True:
+            try:
+                lora_out_queues[priority].put_nowait((time.time(), packet))
+                break
+            except queue.Full:
+                print(f"[DEBUG] Taild-dropped to make room for new element.")
+                try:
+                    lora_out_queues[priority].get_nowait()
+                except queue.Empty:
+                    print(f"[ERROR] Queue was unexpectedly empty when trying to drop tail.")
+                    break
+    
+    @staticmethod
+    def get_from_queue(priority : int) -> tuple[float, bytes] | tuple[None, None]:
+        """
+        Gets the oldest packet from the relevant queue based on priority.
+        Returns None if the queue is empty.
+        """
+        try:
+            return lora_out_queues[priority].get_nowait()
+        except queue.Empty:
+            return None, None
+        
     @staticmethod
     def serialize_lora_message(msg_data : dict) -> str:
         """
@@ -447,7 +502,9 @@ class LoRaWriter:
                                 msg_data['to'])
 
             print(f"[DEBUG] Sent text message from {msg_data['sender']} to {msg_data['to']}")
-            lora_out_queues[2].put((time.time(), header + payload_bytes), block = False)
+            LoRaWriter.put_in_queue(2, header + payload_bytes)
+            hashed_text = hashlib.sha256(bytes(msg_data['sender']) + bytes(msg_data['to']) + payload_bytes).hexdigest()
+            LoRaListener.text_forwarding_counter[hashed_text] = 0
             return True
         except Exception as e:
             print(f"[ERROR] Error serializing message: {e}")
@@ -483,7 +540,7 @@ class LoRaWriter:
                     print(f"[DEBUG] Key for {sender_key_id} already in queue. Skipping.")
                     return False
         
-            lora_out_queues[priority].put((time.time(), packet, sender_key_id), block = False) #TODO change later
+            LoRaWriter.put_in_queue(priority, packet)
             with pending_keys_lock:
                 pending_keys.add(sender_key_id)
             print(f"[DEBUG] Key Publish packet for ID {sender_key_id} added to queue.")
@@ -507,26 +564,21 @@ class LoRaWriter:
                                 int(time.time()), 
                                 key_id)
             full_packet = header + encrypted_info
-            lora_out_queues[4].put((time.time(), full_packet), block = False)
-            print(f"User Details for {key_id} queued.")
+            LoRaWriter.put_in_queue(4, full_packet)
+            print(f"[DEBUG] User Details for {key_id} queued.")
         except Exception as e:
             print(f"[ERROR] Error publishing user details: {e}")
 
     @staticmethod
     def get_next_packet_wfq() -> tuple[int, tuple] | tuple[None, tuple[None, None]]:
         r = random.random()
-        if r < WFQ_PRIORITY_WEIGHTS[0] and not lora_out_queues[1].empty(): 
-            return 1, lora_out_queues[1].get()
-        elif r < WFQ_PRIORITY_WEIGHTS[1] and not lora_out_queues[2].empty():
-            return 2, lora_out_queues[2].get()
-        elif r < WFQ_PRIORITY_WEIGHTS[2] and not lora_out_queues[3].empty():
-            return 3, lora_out_queues[3].get()
-        elif not lora_out_queues[4].empty():
-            return 4, lora_out_queues[4].get()
         
-        for p in [1, 2, 3, 4]:
-            if not lora_out_queues[p].empty():
-                return p, lora_out_queues[p].get()
+        for repeat in [False, True]:
+            for i in range(4):
+                if r < WFQ_PRIORITY_WEIGHTS[i] or repeat:
+                    entry_time, packet = LoRaWriter.get_from_queue(i + 1)
+                    if entry_time is not None and packet is not None:
+                        return i + 1, (entry_time, packet)
         
         return None, (None, None)
 
@@ -541,28 +593,32 @@ class LoRaWriter:
                 print(f"[DEBUG] LoRa Worker started on {device_path}")
 
                 while True:
-                    priority, item = LoRaWriter.get_next_packet_wfq()
-                    if priority is None:
-                        continue
-                    print("[DEBUG] worker got a message")
-                    if isinstance(item[1], bytes):
-                        raw_bytes = item[1]
-                        entry_time = item[0]
-                        if time.time() > entry_time + QUEUE_ENTRY_TTL:
-                            print("[DEBUG] Discarded message entered too long ago")
+                    try:
+                        priority, item = LoRaWriter.get_next_packet_wfq()
+                        if priority is None:
                             continue
-                        modem.write_bytes(raw_bytes)
-                        if priority == 1:
-                            user_id = item[2] 
-                            with pending_keys_lock:
-                                pending_keys.discard(user_id)
-                        with stats_lock:
-                            server_stats["global_messages_sent"] += 1
-                        print(f"[DEBUG] Worker sent {len(raw_bytes)} bytes. Priority: {priority}. Message kind {int(raw_bytes[1])}")
-                    elif item[1] is not None:
-                        print("[ERROR] non byte message in queue")
+                        print("[DEBUG] worker got a message")
+                        if isinstance(item[1], bytes):
+                            raw_bytes = item[1]
+                            entry_time = item[0]
+                            if time.time() > entry_time + QUEUE_ENTRY_TTL:
+                                print("[DEBUG] Discarded message entered too long ago")
+                                continue
+                            modem.write_bytes(raw_bytes)
+                            if raw_bytes[1] == 0x01: # If it's a key publish, remove from pending keys after sending
+                                user_id = struct.unpack("!I", raw_bytes[6:10])[0]
+                                with pending_keys_lock:
+                                    pending_keys.discard(user_id)
+                                    print(f"[DEBUG] Key for {user_id} removed from pending keys")
+                            with stats_lock:
+                                server_stats["global_messages_sent"] += 1
+                            print(f"[DEBUG] Worker sent {len(raw_bytes)} bytes. Priority: {priority}. Message kind {raw_bytes[1]}")
+                        elif item[1] is not None:
+                            print("[ERROR] non byte message in queue")
+                    except Exception as e:
+                        print(f"[ERROR] LoRa Worker crashed during message sending: {e} in line: {e.__traceback__.tb_lineno}")
         except Exception as e:
-            print(f"[ERROR] LoRa Worker crashed: {e}")
+            print(f"[ERROR] LoRa Worker crashed during configuration: {e}")
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description="LoRa Router implementing the REST API and LoRa text protocol")

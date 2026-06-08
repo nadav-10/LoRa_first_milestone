@@ -7,7 +7,7 @@ import requests
 import base64
 import threading
 import struct
-import random
+import random, queue, threading
 import glob
 import hashlib
 
@@ -15,8 +15,9 @@ import hashlib
 sys.path.append(os.path.join(os.path.dirname(__file__), 'lora_common'))
 from pubkey import RSA1024
 
-ROUTER_URL = "http://localhost:8200"
+ROUTER_URL = "http://localhost:8080"
 COORDINATOR_URL = "http://34.165.8.95:8080"  # Franji's Google cloud node 2025-04-16
+# use http://34.165.8.95:8080/coordinator_stats to check stats
 
 class UserState:
     def __init__(self, filename=None, nickname=None):
@@ -25,6 +26,7 @@ class UserState:
         self.key_id = None
         self.messages = []
         self.last_seq = {}
+        self.messages_to_send : queue = queue.Queue()
         
         if nickname:
             self.nickname = nickname
@@ -56,6 +58,7 @@ class UserState:
                 self.last_seq = data.get('last_seq', {})
         except Exception as e:
             print(f"Error loading state from {self.filename}: {e}")
+            
 
     def generate(self):
         print(f"Generating new key pair for {self.nickname}...", flush=True)
@@ -86,6 +89,15 @@ class UserState:
                 self.save()
                 return True
         return False
+    
+def read_line(user : UserState):
+    while True:
+        text = input()
+        print(text)
+        splt_text = text.split('#')
+        if len(splt_text) == 1: splt_text = (None, splt_text[0])
+        user.messages_to_send.put((splt_text[0], splt_text[1]))
+        time.sleep(2.5)
 
 class Simulator:
     def __init__(self, url, coordinator_url, interval, verbose=False, plain_text=False):
@@ -117,14 +129,15 @@ class Simulator:
     def create_user(self, nickname):
         filename = f"user_{nickname}.json"
         if os.path.exists(filename):
-            print(f"Warning: User '{nickname}' already exists. Not recreating.", flush=True)
+           # print(f"Warning: User '{nickname}' already exists. Not recreating.", flush=True)
             return
         u = UserState(nickname=nickname)
         self.log(f"Created user: {u.nickname} ({u.key_id})")
 
     def log(self, msg):
         if self.verbose:
-            print(f"[VERBOSE] {msg}", flush=True)
+          #  print(f"[VERBOSE] {msg}", flush=True)
+          pass
 
     def report_to_coordinator(self, event_type, sender, receiver, message_id, **kwargs):
         report = {
@@ -139,7 +152,7 @@ class Simulator:
             r = requests.post(f"{self.coordinator_url}/report", json=report, timeout=2)
             if r.status_code == 200:
                 if not self.coordinator_connected:
-                    print(f"Connected to coordinator: {self.coordinator_url}", flush=True)
+                  #  print(f"Connected to coordinator: {self.coordinator_url}", flush=True)
                     self.coordinator_connected = True
             else:
                 self.log(f"Coordinator report returned {r.status_code}: {r.text}")
@@ -159,12 +172,14 @@ class Simulator:
                 
                 for lu in self.local_users:
                     if lu.key_id not in received_key_ids:
-                        print(f"\n[WARNING] Local user {lu.nickname} ({lu.key_id}) is NOT reported by router /users API.", flush=True)
+                     #   print(f"\n[WARNING] Local user {lu.nickname} ({lu.key_id}) is NOT reported by router /users API.", flush=True)
+                        pass
 
                 has_remote = any(uid not in simulated_local_ids for uid in received_key_ids)
                 if users and not has_remote:
                     if self.verbose:
-                        print("\n[INFO] Only local users found in /users. No remote routers/users discovered yet.", flush=True)
+                   #     print("\n[INFO] Only local users found in /users. No remote routers/users discovered yet.", flush=True)
+                        pass
 
                 for u in users:
                     kid = u['key_id']
@@ -180,6 +195,7 @@ class Simulator:
                                 self.log(f"Failed to save {remote_file}: {e}")
         except Exception as e:
             self.log(f"Failed to sync users: {e}")
+            print("bug 198")
 
     def decrypt_message(self, local_user, msg):
         if 'text' in msg: return msg['text']
@@ -209,16 +225,20 @@ class Simulator:
             return None
 
     def send_text(self, sender_user, to_key_id, text, report=False, mid=None):
+        print("Has tex")
         target_info = self.remote_users.get(to_key_id)
+        print(target_info)
         if not target_info and not self.plain_text:
+            print("here is the bug line 230")
             return False
             
         try:
+            print("debug0")
             seq = (sender_user.last_seq.get(str(to_key_id), 0) + 1) % 256
             if seq == 0: seq = 1
             sender_user.last_seq[str(to_key_id)] = seq
             sender_user.save()
-            
+            print("debug1")
             text_bytes = text.encode('utf-8')
             payload = struct.pack("BBB", seq, 0, len(text_bytes)) + text_bytes
             
@@ -227,6 +247,7 @@ class Simulator:
                 'to': to_key_id,
                 'utime': int(time.time())
             }
+            print("debug2")
 
             if self.plain_text:
                 plain2_b64 = base64.b64encode(payload).decode('ascii')
@@ -240,6 +261,7 @@ class Simulator:
                 data['crypt2_b64'] = crypt2_b64
                 payload_hash = hashlib.sha256(signed_encrypted).hexdigest()
             
+            print(f"from {sender_user.key_id} to {to_key_id} sent {text}")
             r = requests.post(f"{self.url}/text", json=data, timeout=5)
             if r.status_code == 200:
                 if report and mid:
@@ -253,14 +275,21 @@ class Simulator:
     def poll_user(self, user):
         try:
             key_b64 = base64.b64encode(user.key.public_bytes()).decode('ascii')
+            details_str = f"{user.nickname}:{user.fullname}:{user.phone}"
+            details_bytes = details_str.encode('utf-8')
+            details = bytes([len(details_bytes)]) + details_bytes
+            details_signed = user.key.decrypt(details)
+            details_b64 = base64.b64encode(details_signed).decode('ascii')
+
             data = {
                 'key_b64': key_b64,
-                'nick': user.nickname,
-                'name': user.fullname,
-                'phone': user.phone
+                'details_b64': details_b64
             }
+           # print(f"sending /alive: {data}")
             r = requests.post(f"{self.url}/alive", json=data, timeout=5)
             if r.status_code == 200:
+              #  print(f"response from /alive: {r.json()}")
+
                 resp = r.json()
                 for m in resp.get('messages', []):
                     if m not in user.messages:
@@ -280,6 +309,8 @@ class Simulator:
                                 self.send_text(user, sender_id, f"ACK:{mid}")
                                 self.stats['replied'] += 1
                                 self.report_to_coordinator('REPLIED', sender_id, user.key_id, mid, payload_hash=payload_hash)
+                                #here we get new text, not ack
+                                print(f"from {sender_id} got {mid}")
                             elif text.startswith("ACK:"):
                                 mid = text[4:]
                                 self.stats['cleared'] += 1
@@ -314,6 +345,10 @@ class Simulator:
         last_send = {}
 
         print(f"Starting simulator with {len(self.local_users)} local users...", flush=True)
+
+        for u in self.local_users:
+            print(u.key_id)
+            threading.Thread(target=read_line, args=(u, ), daemon=True).start()
         
         while self.running:
             now = time.time()
@@ -325,33 +360,37 @@ class Simulator:
             for u in self.local_users:
                 self.poll_user(u)
 
+            u : UserState
             for u in self.local_users:
                 if u.key_id is None: continue
                 if u.key_id not in last_send: last_send[u.key_id] = 0
-                if now - last_send[u.key_id] > self.interval:
+                if now - last_send[u.key_id] > self.interval and not u.messages_to_send.empty():
                     all_known = set(k for k in self.remote_users.keys() if k is not None)
                     candidates = [kid for kid in all_known if kid != u.key_id]
                     if candidates:
-                        target_id = random.choice(candidates)
                         self.message_counter += 1
-                        mid = f"{u.key_id}_{self.session_prefix}_{self.message_counter}"
+                        
+                        target_id, mid = u.messages_to_send.get()
                         self.log(f"[{u.nickname}] Sending LOAD:{mid} to {target_id}")
                         self.send_text(u, target_id, f"LOAD:{mid}", report=True, mid=mid)
                     else:
                         if self.verbose and now - last_sync < 1.0:
-                            print(f"[WARNING] No remote users available for {u.nickname} to send to.", flush=True)
+                          #  print(f"[WARNING] No remote users available for {u.nickname} to send to.", flush=True)
+                            pass
                     last_send[u.key_id] = now
             
             nicks = ",".join([u.nickname for u in self.local_users])
             stats_msg = f"Stats[{nicks}]: Sent:{self.stats['sent']} Received:{self.stats['received']} Acked:{self.stats['replied']} Cleared:{self.stats['cleared']}   "
             if not self.verbose:
-                print(f"\r{stats_msg}", end="", flush=True)
+                #print(f"\r{stats_msg}", end="", flush=True)
+                pass
             
             # Print global and router stats every 10 seconds
             if int(now) % 10 == 0 and getattr(self, "_last_stats_print", 0) != int(now):
                 self._last_stats_print = int(now)
                 if self.verbose:
-                    print(f"\n[MONITOR] {stats_msg}", flush=True)
+                    #print(f"\n[MONITOR] {stats_msg}", flush=True)
+                    pass
                 
                 # Global (Coordinator) Stats
                 c_stats = self.get_coordinator_stats()
@@ -362,14 +401,14 @@ class Simulator:
                                  f"Cleared:{c_stats.get('total_cleared')} "
                                  f"Drops(Env:{env_drop} Snd:{diag.get('lost_at_sender_router')} "
                                  f"Med:{diag.get('lost_in_medium')} Rcv:{diag.get('lost_at_receiver_router')})")
-                    if not self.verbose: print("") # New line before global stats
-                    print(global_msg, flush=True)
+                    # if not self.verbose: print("") # New line before global stats
+                    # print(global_msg, flush=True)
 
                 # Router Stats
                 r_stats = self.get_router_stats()
                 if r_stats:
                     r_msg = f"[ROUTER] {self.url}: " + " ".join([f"{k}:{v}" for k, v in r_stats.items()])
-                    print(r_msg, flush=True)
+                    #print(r_msg, flush=True)
             
             time.sleep(1)
 
