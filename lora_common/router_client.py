@@ -94,9 +94,23 @@ def read_line(user : UserState):
     while True:
         text = input()
         print(text)
-        splt_text = text.split('#')
-        if len(splt_text) == 1: splt_text = (None, splt_text[0])
-        user.messages_to_send.put((int(splt_text[0]), splt_text[1]))
+        if '#' in text:
+            splt_text = text.split('#')
+            user.messages_to_send.put((int(splt_text[0]), splt_text[1]))
+        elif '$' in text:
+            splt_text = text.split('$')
+            if splt_text[0] == 'phone':
+                with user.lock:
+                    user.phone = splt_text[1]
+                user.save()
+            elif splt_text[0] == 'nick':
+                with user.lock:
+                    user.nickname = splt_text[1]
+                user.save()
+            elif splt_text[0] == 'name':
+                with user.lock:
+                    user.fullname =splt_text[1]
+                user.save()
         time.sleep(2.5)
 
 class Simulator:
@@ -196,16 +210,16 @@ class Simulator:
             print("bug 198")
 
     def decrypt_message(self, local_user, msg):
-        if 'text' in msg: return msg['text']
+        if 'text' in msg: return None, None, msg['text']
         
         is_plain = 'plain2_b64' in msg
         if not is_plain and 'crypt2_b64' not in msg:
-            return None
+            return None, None, None
             
         sender_id = msg['sender']
         sender_info = self.remote_users.get(sender_id)
         if not sender_info and not is_plain:
-            return None
+            return None, None, None
             
         try:
             if is_plain:
@@ -218,11 +232,11 @@ class Simulator:
             
             if len(decrypted_payload) < 3: return None
             seq, ack, text_len = struct.unpack("BBB", decrypted_payload[:3])
-            return decrypted_payload[3:3+text_len].decode('utf-8')
+            return seq, ack, decrypted_payload[3:3+text_len].decode('utf-8')
         except Exception as e:
-            return None
+            return None, None, None
 
-    def send_text(self, sender_user, to_key_id, text, report=False, mid=None):
+    def send_text(self, sender_user, to_key_id, text, report=False, mid=None, ack_seq = 0):
         print("Has tex")
         print(to_key_id.__class__)
         target_info = self.remote_users.get(to_key_id)
@@ -238,7 +252,7 @@ class Simulator:
             sender_user.save()
             print("debug1")
             text_bytes = text.encode('utf-8')
-            payload = struct.pack("BBB", seq, 0, len(text_bytes)) + text_bytes
+            payload = struct.pack("BBB", seq, seq*ack_seq, len(text_bytes)) + text_bytes
             
             data = {
                 'sender': sender_user.key_id,
@@ -291,7 +305,7 @@ class Simulator:
                 resp = r.json()
                 for m in resp.get('messages', []):
                     if m not in user.messages:
-                        text = self.decrypt_message(user, m)
+                        seq, ack, text = self.decrypt_message(user, m)
                         if text:
                             crypt2 = base64.b64decode(m.get('crypt2_b64', m.get('plain2_b64', '')))
                             payload_hash = hashlib.sha256(crypt2).hexdigest()
@@ -300,19 +314,22 @@ class Simulator:
                             sender_id = m['sender']
                             self.log(f"[{user.nickname}] Received: {text} from {sender_id}")
                             
-                            if text.startswith("LOAD:"):
-                                mid = text[5:]
+                            if ack == 0:
+                                mid = text
                                 self.stats['received'] += 1
                                 self.report_to_coordinator('RECEIVED', sender_id, user.key_id, mid, payload_hash=payload_hash)
-                                self.send_text(user, sender_id, f"ACK:{mid}")
+                                self.send_text(user, sender_id, f"{mid}", ack_seq = 1)
+                                print(f"sent ACK on message {seq} to {sender_id}")
                                 self.stats['replied'] += 1
                                 self.report_to_coordinator('REPLIED', sender_id, user.key_id, mid, payload_hash=payload_hash)
                                 #here we get new text, not ack
                                 print(f"from {sender_id} got {mid}")
-                            elif text.startswith("ACK:"):
-                                mid = text[4:]
+                            elif seq == ack:
+                                mid = text
                                 self.stats['cleared'] += 1
                                 self.report_to_coordinator('CLEARED', user.key_id, sender_id, mid, payload_hash=payload_hash)
+                                print(f"got ACK on message {seq} from {sender_id}")
+                                #TODO why not to save ack instead of payload_hash?
                         else:
                             self.log(f"[{user.nickname}] Delaying message from {m.get('sender')}: missing key or decryption failed.")
         except Exception as e:
@@ -370,7 +387,7 @@ class Simulator:
                         
                         target_id, mid = u.messages_to_send.get()
                         self.log(f"[{u.nickname}] Sending LOAD:{mid} to {target_id}")
-                        self.send_text(u, target_id, f"LOAD:{mid}", report=True, mid=mid)
+                        self.send_text(u, target_id, f"{mid}", report=True, mid=mid)
                     else:
                         if self.verbose and now - last_sync < 1.0:
                           #  print(f"[WARNING] No remote users available for {u.nickname} to send to.", flush=True)
