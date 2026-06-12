@@ -7,14 +7,19 @@ import requests
 import base64
 import threading
 import struct
-import random, queue, threading
+import random
+import queue
+import threading
 import glob
 import hashlib
 
 # Ensure lora_common is in path for pubkey
 sys.path.append(os.path.join(os.path.dirname(__file__), 'lora_common'))
 from pubkey import RSA1024
-
+INPUT_COMMAND_DELAY = 2.5
+DEFAULT_INTERVAL = 30
+REMOTE_SYNC_INTERVAL = 10
+SIM_LOOP_DELAY = 1
 ROUTER_URL = "http://localhost:8200"
 COORDINATOR_URL = "http://34.165.8.95:8080"  # Franji's Google cloud node 2025-04-16
 # use http://34.165.8.95:8080/coordinator_stats to check stats
@@ -25,7 +30,9 @@ class UserState:
         self.key = None
         self.key_id = None
         self.messages = []
-        self.last_seq = {}
+        self.last_out_seq = {}
+        self.messages_by_seq = {}
+        self.last_in_seq = {}
         self.messages_to_send : queue = queue.Queue()
         
         if nickname:
@@ -55,13 +62,13 @@ class UserState:
                     self.key = RSA1024.from_private_text(pem)
                     self.key_id = int.from_bytes(self.key.key_id(), 'big')
                 self.messages = data.get('messages', [])
-                self.last_seq = data.get('last_seq', {})
+                self.last_out_seq = data.get('last_seq', {})
         except Exception as e:
-            print(f"Error loading state from {self.filename}: {e}")
+            print(f"[ERROR] Error loading state from {self.filename}: {e}")
             
 
     def generate(self):
-        print(f"Generating new key pair for {self.nickname}...", flush=True)
+        print(f"[DEBUG] Generating new key pair for {self.nickname}...", flush=True)
         self.key = RSA1024.generate()
         self.key_id = int.from_bytes(self.key.key_id(), 'big')
         self.save()
@@ -74,13 +81,13 @@ class UserState:
                 'phone': self.phone,
                 'private_key': self.key.private_key_text() if self.key else None,
                 'messages': self.messages,
-                'last_seq': self.last_seq
+                'last_seq': self.last_out_seq
             }
             try:
                 with open(self.filename, 'w') as f:
                     json.dump(data, f, indent=2)
             except Exception as e:
-                print(f"Error saving {self.filename}: {e}", flush=True)
+                print(f"[ERROR] Error saving {self.filename}: {e}", flush=True)
 
     def add_message(self, msg):
         with self.lock:
@@ -90,28 +97,33 @@ class UserState:
                 return True
         return False
     
-def read_line(user : UserState):
+def read_line(user : UserState, local_users, remote_users):
     while True:
-        text = input()
-        print(text)
-        if '#' in text:
+        text = input("Enter command. Formats: '<target>#<message>', '<detail>$<new_value>', 'USERS'\n")
+        if text.count('#') == 1 and text.count('$') == 0:
             splt_text = text.split('#')
-            user.messages_to_send.put((int(splt_text[0]), splt_text[1]))
-        elif '$' in text:
+            try:
+                user.messages_to_send.put((int(splt_text[0]), splt_text[1]))
+            except (ValueError, TypeError):
+                print("[ERROR] Invalid target key_id. Must be an integer.")
+        elif text.count('$') == 1 and text.count('#') == 0:
             splt_text = text.split('$')
             if splt_text[0] == 'phone':
-                with user.lock:
-                    user.phone = splt_text[1]
-                user.save()
+                user.phone = splt_text[1]
             elif splt_text[0] == 'nick':
-                with user.lock:
-                    user.nickname = splt_text[1]
-                user.save()
+                user.nickname = splt_text[1]
             elif splt_text[0] == 'name':
-                with user.lock:
-                    user.fullname =splt_text[1]
-                user.save()
-        time.sleep(2.5)
+                user.fullname = splt_text[1]
+            else:
+                print("[ERROR] Invalid detail field. Use 'phone', 'nick', or 'name'.")
+            user.save()
+        elif text.strip().upper() == "USERS":
+            print("Known users:")
+            print("\n".join(f"local - key id: {u.key_id}, nickname: {u.nickname}, full name: {u.fullname}, phone: {u.phone}" for u in local_users))
+            print("\n".join(f"remote - key id: {u['key_id']}, nickname: {u.get('nickname')}, full name: {u.get('fullname')}, phone: {u.get('phone')}, delay: {u['delay_secs']}" for u in remote_users.values()))
+        else:
+            print("[ERROR] Invalid command format. Please use '<target>#<message>' or '<detail>$<new_value>' or 'USERS'.")
+        time.sleep(INPUT_COMMAND_DELAY)
 
 class Simulator:
     def __init__(self, url, coordinator_url, interval, verbose=False, plain_text=False):
@@ -125,7 +137,7 @@ class Simulator:
         self.running = True
         self.stats = {'sent': 0, 'received': 0, 'replied': 0, 'cleared': 0}
         self.message_counter = 0
-        self.session_prefix = int(time.time() % 100000)
+        # self.session_prefix = int(time.time() % 100000)
         self.router_connected = False
         self.coordinator_connected = False
 
@@ -136,24 +148,23 @@ class Simulator:
                 u = UserState(filename=f)
                 if u.key_id:
                     self.local_users.append(u)
-                    self.log(f"Loaded local user: {u.nickname} ({u.key_id})")
+                    self.log(f"[DEBUG] Loaded local user: {u.nickname} ({u.key_id})")
             except Exception as e:
-                self.log(f"Failed to load user file {f}: {e}")
+                self.log(f"[DEBUG] Failed to load user file {f}: {e}")
 
     def create_user(self, nickname):
         filename = f"user_{nickname}.json"
         if os.path.exists(filename):
-           # print(f"Warning: User '{nickname}' already exists. Not recreating.", flush=True)
+            print(f"[ERROR]: User '{nickname}' already exists. Not recreating.", flush=True)
             return
         u = UserState(nickname=nickname)
-        self.log(f"Created user: {u.nickname} ({u.key_id})")
+        self.log(f"[DEBUG] Created user: {u.nickname} ({u.key_id})")
 
     def log(self, msg):
         if self.verbose:
-          #  print(f"[VERBOSE] {msg}", flush=True)
-          pass
-
+           print(f"[VERBOSE] {msg}", flush=True)
     def report_to_coordinator(self, event_type, sender, receiver, message_id, **kwargs):
+        return None
         report = {
             'type': event_type,
             'sender': sender,
@@ -166,19 +177,19 @@ class Simulator:
             r = requests.post(f"{self.coordinator_url}/report", json=report, timeout=2)
             if r.status_code == 200:
                 if not self.coordinator_connected:
-                  #  print(f"Connected to coordinator: {self.coordinator_url}", flush=True)
+                    print(f"[DEBUG] Connected to coordinator: {self.coordinator_url}", flush=True)
                     self.coordinator_connected = True
             else:
-                self.log(f"Coordinator report returned {r.status_code}: {r.text}")
+                self.log(f"[DEBUG] Coordinator report returned {r.status_code}: {r.text}")
         except Exception as e:
-            self.log(f"Coordinator report failed: {e}")
+            self.log(f"[ERROR] Coordinator report failed: {e}")
 
     def sync_remote_users(self):
         try:
             r = requests.get(f"{self.url}/users", timeout=5)
             if r.status_code == 200:
                 if not self.router_connected:
-                    print(f"Connected to router: {self.url}", flush=True)
+                    print(f"[DEBUG] Connected to router: {self.url}", flush=True)
                     self.router_connected = True
                 users = r.json().get('users', [])
                 received_key_ids = {u['key_id'] for u in users}
@@ -186,13 +197,11 @@ class Simulator:
                 
                 for lu in self.local_users:
                     if lu.key_id not in received_key_ids:
-                     #   print(f"\n[WARNING] Local user {lu.nickname} ({lu.key_id}) is NOT reported by router /users API.", flush=True)
-                        pass
+                       print(f"\n[DEBUG] Warning: Local user {lu.nickname} ({lu.key_id}) is NOT reported by router /users API.", flush=True)
                 has_remote = any(uid not in simulated_local_ids for uid in received_key_ids)
                 if users and not has_remote:
                     if self.verbose:
-                   #     print("\n[INFO] Only local users found in /users. No remote routers/users discovered yet.", flush=True)
-                        pass
+                       print("\n[DEBUG] Only local users found in /users. No remote routers/users discovered yet.", flush=True)
                 for u in users:
                     kid = u['key_id']
                     self.remote_users[kid] = u
@@ -202,12 +211,11 @@ class Simulator:
                             try:
                                 with open(remote_file, 'w') as f:
                                     json.dump(u, f, indent=2)
-                                self.log(f"Created {remote_file}")
+                                self.log(f"[DEBUG] Created {remote_file}")
                             except Exception as e:
-                                self.log(f"Failed to save {remote_file}: {e}")
+                                self.log(f"[ERROR] Failed to save {remote_file}: {e}")
         except Exception as e:
-            self.log(f"Failed to sync users: {e}")
-            print("bug 198")
+            self.log(f"[ERROR] Failed to sync users: {e}")
 
     def decrypt_message(self, local_user, msg):
         if 'text' in msg: return None, None, msg['text']
@@ -232,34 +240,31 @@ class Simulator:
             
             if len(decrypted_payload) < 3: return None
             seq, ack, text_len = struct.unpack("BBB", decrypted_payload[:3])
-            return seq, ack, decrypted_payload[3:3+text_len].decode('utf-8')
+            return seq, ack, text_len, decrypted_payload[3:3+text_len].decode('utf-8')
         except Exception as e:
             return None, None, None
 
-    def send_text(self, sender_user, to_key_id, text, report=False, mid=None, ack_seq = 0):
-        print("Has tex")
-        print(to_key_id.__class__)
-        target_info = self.remote_users.get(to_key_id)
-        if not target_info and not self.plain_text:
-            print("here is the bug line 230")
-            return False
-            
+    def send_text(self, sender_user : UserState, to_key_id, text, report=False, mid=None):
         try:
-            print("debug0")
-            seq = (sender_user.last_seq.get(str(to_key_id), 0) + 1) % 256
+            target_info = self.remote_users.get(to_key_id)
+            if not target_info and not self.plain_text:
+                return False
+            
+            seq = (sender_user.last_out_seq.get(to_key_id, 0) + 1) % 256
             if seq == 0: seq = 1
-            sender_user.last_seq[str(to_key_id)] = seq
+            sender_user.last_out_seq[to_key_id] = seq
             sender_user.save()
-            print("debug1")
+            if to_key_id not in sender_user.messages_by_seq:
+                sender_user.messages_by_seq[to_key_id] = {}
+            sender_user.messages_by_seq[to_key_id][seq] = text
             text_bytes = text.encode('utf-8')
-            payload = struct.pack("BBB", seq, seq*ack_seq, len(text_bytes)) + text_bytes
+            payload = struct.pack("BBB", seq, sender_user.last_in_seq.get(to_key_id, 0), len(text_bytes)) + text_bytes
             
             data = {
                 'sender': sender_user.key_id,
                 'to': to_key_id,
                 'utime': int(time.time())
             }
-            print("debug2")
 
             if self.plain_text:
                 plain2_b64 = base64.b64encode(payload).decode('ascii')
@@ -273,18 +278,19 @@ class Simulator:
                 data['crypt2_b64'] = crypt2_b64
                 payload_hash = hashlib.sha256(signed_encrypted).hexdigest()
             
-            print(f"from {sender_user.key_id} to {to_key_id} sent {text}")
+            print(f"[DEBUG] from {sender_user.key_id} to {to_key_id} sent {text}")
             r = requests.post(f"{self.url}/text", json=data, timeout=5)
             if r.status_code == 200:
                 if report and mid:
                     self.stats['sent'] += 1
-                    self.report_to_coordinator('SENT', sender_user.key_id, to_key_id, mid, payload_hash=payload_hash)
+               #     self.report_to_coordinator('SENT', sender_user.key_id, to_key_id, mid, payload_hash=payload_hash)
                 return True
             return False
         except Exception as e:
+            print(f"[ERROR]: there was an error in send_text {e}")
             return False
 
-    def poll_user(self, user):
+    def poll_user(self, user : UserState):
         try:
             key_b64 = base64.b64encode(user.key.public_bytes()).decode('ascii')
             details_str = f"{user.nickname}:{user.fullname}:{user.phone}"
@@ -305,35 +311,35 @@ class Simulator:
                 resp = r.json()
                 for m in resp.get('messages', []):
                     if m not in user.messages:
-                        seq, ack, text = self.decrypt_message(user, m)
-                        if text:
+                        seq, ack, text_len, text = self.decrypt_message(user, m)
+                        sender_id = m['sender']
+                        user.add_message(m)
+                        if text_len > 0:
                             crypt2 = base64.b64decode(m.get('crypt2_b64', m.get('plain2_b64', '')))
                             payload_hash = hashlib.sha256(crypt2).hexdigest()
                             
-                            user.add_message(m)
-                            sender_id = m['sender']
                             self.log(f"[{user.nickname}] Received: {text} from {sender_id}")
-                            
-                            if ack == 0:
-                                mid = text
-                                self.stats['received'] += 1
-                                self.report_to_coordinator('RECEIVED', sender_id, user.key_id, mid, payload_hash=payload_hash)
-                                self.send_text(user, sender_id, f"{mid}", ack_seq = 1)
-                                print(f"sent ACK on message {seq} to {sender_id}")
-                                self.stats['replied'] += 1
-                                self.report_to_coordinator('REPLIED', sender_id, user.key_id, mid, payload_hash=payload_hash)
-                                #here we get new text, not ack
-                                print(f"from {sender_id} got {mid}")
-                            elif seq == ack:
-                                mid = text
-                                self.stats['cleared'] += 1
-                                self.report_to_coordinator('CLEARED', user.key_id, sender_id, mid, payload_hash=payload_hash)
-                                print(f"got ACK on message {seq} from {sender_id}")
-                                #TODO why not to save ack instead of payload_hash?
+                            print(f"[DEBUG] from {sender_id} got {text}")
+                            # mid = text
+                            self.stats['received'] += 1
+                          #  self.report_to_coordinator('RECEIVED', sender_id, user.key_id, text, payload_hash=payload_hash)
+                            user.last_in_seq[sender_id] = seq
+                            self.send_text(user, sender_id, '')
+                            print(f"[DEBUG] sent ACK on message {seq} to {sender_id}")
+                            self.stats['replied'] += 1
+                          #  self.report_to_coordinator('REPLIED', sender_id, user.key_id, text, payload_hash=payload_hash)
+
+                        if ack != 0 and ack in user.messages_by_seq.get(sender_id, {}):
+                            # mid = text
+                            self.stats['cleared'] += 1
+                           # self.report_to_coordinator('CLEARED', user.key_id, sender_id, text, payload_hash=payload_hash)
+                            print(f"[DEBUG] got ACK on message {ack} from {sender_id} - {user.messages_by_seq.get(sender_id, {}).pop(ack)}")
+                            #TODO why not to save ack instead of payload_hash?
                         else:
                             self.log(f"[{user.nickname}] Delaying message from {m.get('sender')}: missing key or decryption failed.")
         except Exception as e:
-            self.log(f"poll_user error for {user.nickname}: {e}")
+            print(f"[DEBUG] poll_user error for {user.nickname}: {e}")
+            self.log(f"[DEBUG] poll_user error for {user.nickname}: {e}")
 
     def get_router_stats(self):
         try:
@@ -347,6 +353,7 @@ class Simulator:
         return None
 
     def get_coordinator_stats(self):
+        return {}
         try:
             r = requests.get(f"{self.coordinator_url}/coordinator_stats", timeout=2)
             if r.status_code == 200:
@@ -357,18 +364,18 @@ class Simulator:
 
     def run(self):
         last_sync = 0
-        last_send = {}
+        # last_send = {}
 
-        print(f"Starting simulator with {len(self.local_users)} local users...", flush=True)
+        print(f"[DEBUG] Starting simulator with {len(self.local_users)} local users...", flush=True)
 
         for u in self.local_users:
             print(u.key_id)
-            threading.Thread(target=read_line, args=(u, ), daemon=True).start()
+            threading.Thread(target=read_line, args=(u, self.local_users, self.remote_users ), daemon=True).start()
         
         while self.running:
             now = time.time()
             
-            if now - last_sync > 10:
+            if now - last_sync > REMOTE_SYNC_INTERVAL:
                 self.sync_remote_users()
                 last_sync = now
 
@@ -378,26 +385,28 @@ class Simulator:
             u : UserState
             for u in self.local_users:
                 if u.key_id is None: continue
-                if u.key_id not in last_send: last_send[u.key_id] = 0
-                if now - last_send[u.key_id] > self.interval and not u.messages_to_send.empty():
-                    all_known = set(k for k in self.remote_users.keys() if k is not None)
-                    candidates = [kid for kid in all_known if kid != u.key_id]
-                    if candidates:
-                        self.message_counter += 1
-                        
-                        target_id, mid = u.messages_to_send.get()
-                        self.log(f"[{u.nickname}] Sending LOAD:{mid} to {target_id}")
-                        self.send_text(u, target_id, f"{mid}", report=True, mid=mid)
-                    else:
-                        if self.verbose and now - last_sync < 1.0:
-                          #  print(f"[WARNING] No remote users available for {u.nickname} to send to.", flush=True)
-                            pass
-                    last_send[u.key_id] = now
+                # if u.key_id not in last_send: last_send[u.key_id] = 0
+                # if now - last_send[u.key_id] > self.interval and not u.messages_to_send.empty():
+                #     all_known = set(k for k in self.remote_users.keys() if k is not None)
+                #     candidates = [kid for kid in all_known if kid != u.key_id]
+                #     if candidates:
+                #         self.message_counter += 1
+                try:
+                    target_id, text = u.messages_to_send.get_nowait()
+                    self.log(f"[{u.nickname}] Sending {text} to {target_id}")
+                    self.send_text(u, target_id, text, report=True, mid=text)
+                except queue.Empty:
+                    pass
+            # else:
+            #     if self.verbose and now - last_sync < 1.0:
+            #         #  print(f"[WARNING] No remote users available for {u.nickname} to send to.", flush=True)
+            #         pass
+            # last_send[u.key_id] = now
             
             nicks = ",".join([u.nickname for u in self.local_users])
             stats_msg = f"Stats[{nicks}]: Sent:{self.stats['sent']} Received:{self.stats['received']} Acked:{self.stats['replied']} Cleared:{self.stats['cleared']}   "
             if not self.verbose:
-                #print(f"\r{stats_msg}", end="", flush=True)
+                # print(f"\r{stats_msg}", end="", flush=True)
                 pass
             
             # Print global and router stats every 10 seconds
@@ -425,7 +434,7 @@ class Simulator:
                     r_msg = f"[ROUTER] {self.url}: " + " ".join([f"{k}:{v}" for k, v in r_stats.items()])
                     #print(r_msg, flush=True)
             
-            time.sleep(1)
+            time.sleep(SIM_LOOP_DELAY)
 
 def main():
     lock_file_path = "router_client.lock"
@@ -447,7 +456,7 @@ def main():
     parser.add_argument("--new-user", help="Create/Load a new user with this nickname")
     parser.add_argument("--url", default=ROUTER_URL, help="Router URL")
     parser.add_argument("--coordinator", default=COORDINATOR_URL, help="Coordinator URL")
-    parser.add_argument("--interval", type=int, default=30, help="Send interval T_SEND (seconds)")
+    parser.add_argument("--interval", type=int, default=DEFAULT_INTERVAL, help="Send interval T_SEND (seconds)")
     parser.add_argument("--verbose", action="store_true", help="Verbose output")
     parser.add_argument("--plain", action="store_true", help="Send messages as plain text (no encryption)")
     args = parser.parse_args()
@@ -460,7 +469,7 @@ def main():
     sim.load_users()
 
     if not sim.local_users:
-        print("Error: No local users found. Please run with --new-user <nickname> to create one.")
+        print("[ERROR] No local users found. Please run with --new-user <nickname> to create one.")
         sys.exit(1)
 
     try:
