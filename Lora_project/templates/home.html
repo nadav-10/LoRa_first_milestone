@@ -1,0 +1,96 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>CAT Server - Home</title>
+</head>
+<body>
+
+
+    <header>
+        <h1>CAT Server Home Page</h1>
+
+        <h3>Your Profile Details:</h3>
+    <ul>
+        <li><strong>Your Key ID (Session):</strong> {{ session['user_key_id'] }}</li>
+        <li><strong>Nickname:</strong> {{ current_user.nickname if current_user and current_user.nickname else 'N/A...' }}</li>
+        <li><strong>Full Name:</strong> {{ current_user.fullname if current_user and current_user.fullname else 'N/A...' }}</li>
+        <li><strong>Phone:</strong> {{ current_user.phone if current_user and current_user.phone else 'N/A...' }}</li>
+        <li><strong>Is encrypted:</strong>{{"T" if current_user and current_user.is_encrypted else "F"}}</li>
+    </ul>
+    <hr>
+
+    <h3>Update Your Profile Settings</h3>
+    <form action="/update-profile" method="POST">
+        <div>
+            <label for="fullname">Full Name:</label>
+            <input type="text" id="fullname" name="fullname" value="{{ current_user.fullname if current_user else '' }}">
+        </div>
+        <br>
+        <div>
+            <label for="nickname">Nickname (Handle):</label>
+            <input type="text" id="nickname" name="nickname" value="{{ current_user.nickname if current_user else '' }}">
+        </div>
+        <br>
+        <div>
+            <label for="phone">Phone Number:</label>
+            <input type="text" id="phone" name="phone" value="{{ current_user.phone if current_user else '' }}">
+        </div>
+        <br>
+        <div>
+            <label>
+                <input type="checkbox" name="is_encrypted" {% if current_user and current_user.is_encrypted %}checked{% endif %}>
+                Enable Message Encryption
+            </label>
+        </div>
+        <br>
+        <button type="submit">Save Changes</button>
+    </form>
+
+    </header>
+
+
+    <h2>All Users</h2>
+    <table border="1" cellpadding="8" style="border-collapse: collapse; text-align: left;">
+        <thead>
+            <tr style="background-color: #f2f2f2;">
+                <th>Status</th>
+                <th>Key ID</th>
+                <th>Nickname</th>
+                <th>Full Name</th>
+                <th>Phone</th>
+                <th>Chat</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for user in users %}
+            <tr>
+                <td>
+                    <span style="
+                        height: 12px; 
+                        width: 12px; 
+                        background-color: {{ get_color(user.delay_secs) }}; 
+                        border-radius: 50%; 
+                        display: inline-block; 
+                        margin-right: 5px;">
+                    </span>
+                    Connected
+                </td>
+
+                <td>{{ user.key_id }}</td>
+                <td>{{ user.nickname }}</td>
+                <td>{{ user.fullname }}</td>
+                <td>{{ user.phone }}</td>
+                
+                <td>
+                    <a href="/messages/{{ user.key_id }}">Chat</a>
+                </td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+    
+    <br> <a href="/">Back to Login</a> <br>
+    <img src = "static/shimi1.jpg" alt = "shimi1", style = "height: 30%; width: 30%">
+</body>
+</html>
