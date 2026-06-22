@@ -1,0 +1,10 @@
+{
+  "nickname": "",
+  "fullname": "",
+  "phone": "",
+  "private_key": "-----BEGIN RSA PRIVATE KEY-----\nMIICXAIBAAKBgQDVpUr9zXunf1bLb5VXtc+dkFSLUt2ILOv3Y8F2SzjhccoEp9R3\n9UpaxsQDNBBWE+9rJsbFRABeDhQ6U5TsUReHWnKUomN4aEWSoe7sTOjnk5ngQS47\nedmbHDpJlIHoh4bq1nyLZ3+f+Mto37mf9eDXAGVVQIKb8XdbIdciPLb0uwIDAQAB\nAoGAHe8rezUzyquyXw2y2Je+T77dwamqJX7Zzw9Yl3kBrsDRQ+a6A9bIBMENzL8a\nPN1NMe+8cP5OqN8DIYr9dkEEcS5/cdrPz/TRbAgNTWHXEcsQdmSTVzaCBjhR2ErT\nX4ALbftI5UsxOrDWMC6KbIl32xrejYkKm8rex5FYtJiodykCQQDiwEZvDsZIy6Jj\n3xoiGFlT/GrxLJx8LHLPobigflZAXoPYqRYLJN+/4pKNFOb5d/glLGr5EHXinUXC\nxzKoZX9jAkEA8TRBD/KU6ntEU5phy+bMqoY8c7aFRtMYNA9+07YdN0E2yFRT1Ws+\nn9e0eKA0Oob969ycLFDEnv+1RLybVR1QyQJAHHNhoweoi3O5gWx52/NQKgCO7onZ\nbJ8rHLA++SxA6DyzsFiu4mETDgGAv+DyhjSuVwO2vF97Wx6+pQzXZ1es3wJBALls\nbzvgQ2SCwIL4oofKdLn+mchmnsxUiT20T85XKNyKUJ/uW8gsOqdMfptgpOX9UoSY\nQqK6sHx+nQ4rY8op0CkCQEAKIE0Tu79uony3TfLXcHkuJDkKJ4eUoBCLFwivelBm\ngjBRgrV2RxNRgW7I1hGsFx6fXvEKVKZsq7hhLmdqHLM=\n-----END RSA PRIVATE KEY-----",
+  "messages": [
+  ],
+  "last_seq": {
+  }
+}

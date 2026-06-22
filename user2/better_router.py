@@ -1,4 +1,3 @@
-
 from flask import Flask, jsonify, request
 import time
 import base64
@@ -9,12 +8,13 @@ import random
 from lora_common.loramodem import LoRaModem
 import argparse
 import hashlib
+from lora_common.pubkey import RSA1024
 app = Flask(__name__)
 USER_EXPIRATION_SECONDS = 300
-KEY_PUBLISH_INTERVAL = 120
-USER_DETAILS_INTERVAL = 120
-KEY_PUBLISH_INTERVAL_OFFSET = 60
-USER_DETAILS_INTERVAL_OFFSET = 60
+KEY_PUBLISH_INTERVAL = 60
+USER_DETAILS_INTERVAL = 60
+KEY_PUBLISH_INTERVAL_OFFSET = 0
+USER_DETAILS_INTERVAL_OFFSET = 0
 QUEUE_MAX_SIZES = (50, 50, 50, 30)
 WFQ_PRIORITY_WEIGHTS = (0.5, 0.8, 0.95) #accumulative
 QUEUE_ENTRY_TTL = 300
@@ -107,18 +107,16 @@ class ServerBE:
         key_id = ServerBE.get_key_id_from_b64(key_b64)
         with stats_lock:
             server_stats["valid_alive_requests"] += 1
-
-        # Update registry with all fields required by the /users GET request
-        with users_lock:
-            users_registry[key_id] = {
-                "key_id": key_id,
-                "key_b64": key_b64,
-                "nick": data.get('nick', ""),
-                "name": data.get('name', ""),
-                "phone": data.get('phone', ""),
-                "delay_secs": 0,      # Default for local check-in
-                "is_local": True      # This user is hitting our REST API directly
-            }
+        if "details_b64" in data:
+            encrypted_info = base64.b64decode(data["details_b64"])
+            with users_lock:
+                users_registry[key_id] = {
+                    "key_id": key_id,
+                    "key_b64": key_b64,
+                    "is_local": True      # This user is hitting our REST API directly
+                }
+            LoRaListener.register_user(key_id, encrypted_info, 0)
+        else: encrypted_info = None
         with inbox_lock:
             message_inbox[key_id] = message_inbox.get(key_id, [])
         with last_seen_lock:
@@ -129,9 +127,8 @@ class ServerBE:
             ServerBE.next_publish[key_id] = time.time() + KEY_PUBLISH_INTERVAL + random.randint(0, KEY_PUBLISH_INTERVAL_OFFSET)
         if key_id not in ServerBE.next_details or time.time() > ServerBE.next_details[key_id]:
             print("hello world for debug")
-            LoRaWriter.publish_user_details(users_registry[key_id]) #TODO: modify this function to accept key_id as param
+            LoRaWriter.publish_user_details(key_id, encrypted_info)
             ServerBE.next_details[key_id] = time.time() + USER_DETAILS_INTERVAL + random.randint(0, USER_DETAILS_INTERVAL_OFFSET)
-
         # Retrieve messages for this specific user
         with inbox_lock:
             return message_inbox[key_id]
@@ -190,19 +187,16 @@ def alive():
     Updates user info and returns pending messages.
     """
     data = request.get_json()
-
     # key_b64 is the only mandatory field
     if not data or 'key_b64' not in data:
         return jsonify({
             "status": "error",
             "error": "Invalid key_b64"
         }), 400
-
     key_b64 = data.get('key_b64')
     key_id = ServerBE.get_key_id_from_b64(key_b64)
     if key_id is None:
         return jsonify({"status": "error", "error": "Malformed key_b64"}), 400
-
     #handle all operations related to /alive endpoint
     messages = ServerBE.handle_alive_calls(data)
     return jsonify({
@@ -246,8 +240,38 @@ class LoRaListener:
     text_forwarding_counter = {}
     @staticmethod
     def periodic_text_forwarding(packet : bytes, sender : bytes, to : bytes, crypt : bytes):
-        if random.random() < PERIODIC_TEXT_CHANCE ** LoRaListener.text_forwarding_counter.get(hashlib.sha256(sender + to + crypt)):
-            lora_out_queues[3].put(packet)
+        hashed_text = hashlib.sha256((sender, to, crypt))
+        LoRaListener.text_forwarding_counter[hashed_text] = LoRaListener.text_forwarding_counter.get(hashed_text, default = -1) + 1
+        if random.random() < PERIODIC_TEXT_CHANCE ** LoRaListener.text_forwarding_counter[hashed_text]:
+            lora_out_queues[3].put(int(time.time()), packet)
+
+    @staticmethod
+    def register_user(user_id : int, details : bytes, delay : int):
+        with users_lock:
+            key_b64 = users_registry[user_id]["key_b64"]
+        
+
+        my_public_rsa_key = RSA1024.from_public_bytes(base64.b64decode(key_b64))
+        info = my_public_rsa_key.encrypt(details)
+        if info[0] == 0x00:
+            return
+        info = info[1:].decode("utf-8")
+        parts = info.split(':') if info else ["", "", ""]
+        if len(parts) != 3:
+            print(f"[ERROR] Malformed user details string: '{info}'")
+            return
+
+        new_details = {
+            "nick": parts[0],
+            "name": parts[1],
+            "phone": parts[2],
+            "delay_secs": max(0, delay)
+        }
+
+        with users_lock:
+            # User is known, update their details in the registry
+            users_registry[user_id].update(new_details)
+            print(f"[DEBUG] Updated registry for known user {user_id}")
 
     @staticmethod
     def handle_incoming_key_publish(packet : bytes):
@@ -275,22 +299,17 @@ class LoRaListener:
                         "delay_secs": delay,
                         "is_local": False 
                     }
-                    lora_out_queues[3].put(packet)
+                    lora_out_queues[3].put((int(packet[2:6]), packet))
                     print(f"[DEBUG] Registered new remote user: {sender_id}")
                     with cached_details_lock:
                         if sender_id in cached_user_details:
-                            cached_data = cached_user_details.pop(sender_id)
-                            if [users_registry[sender_id][field] for field in ["nick", "name", "phone"]] == ["", "", ""]:
-                                lora_out_queues[3].put(packet)
-                            elif random.random() < PERIODIC_DETAILS_CHANCE:
-                                lora_out_queues[3].put(packet)
-                            users_registry[sender_id].update(cached_data)
+                            cached_data, delay = cached_user_details.pop(sender_id)
+                            LoRaListener.register_user(sender_id, cached_data, delay)
                             print(f"[DEBUG] Applied cached details to new user {sender_id}")
                 else:
                     users_registry[sender_id]["delay_secs"] = delay
                     if random.random < PERIODIC_KEY_CHANCE:
-                        lora_out_queues[3].put(packet)
-
+                        lora_out_queues[3].put((int(time.time()), packet))
                     
         except Exception as e:
             print(f"[ERROR] Unexpected error parsing Key Publish: {e}")
@@ -304,20 +323,18 @@ class LoRaListener:
                 print(f"[ERROR] Received packet of length {len(packet)}, should be at least 14")
                 return
             kind, utime, sender_id, to_id = struct.unpack("!BIII", packet[1:14])
-            
 
             # The rest of the packet is the payload
             payload_bytes = packet[14:]
             payload_b64 = base64.b64encode(payload_bytes).decode('utf-8')
-            
-            #periodic forwarding
-            LoRaListener.periodic_text_forwarding(packet, packet[6:10], packet[10:14], payload_bytes)
+
             # Build the message object
             msg_data = {
                 "utime": utime,
                 "sender": sender_id,
                 "to": to_id,
             }
+            LoRaListener.periodic_text_forwarding(packet, sender_id, to_id, payload_bytes)
 
             if kind == 0x03:
                 msg_data["crypt2_b64"] = payload_b64
@@ -328,10 +345,9 @@ class LoRaListener:
             print(f"[DEBUG] Received Text Kind {kind} from {sender_id} to {to_id}")
             
             # Route it (local inbox or remote queue)
-            with users_lock:
-                if to_id in users_registry:
-                    with inbox_lock:
-                        message_inbox[to_id].append(msg_data)
+            with inbox_lock:
+                if to_id in message_inbox:
+                    message_inbox[to_id].append(msg_data)
 
         except Exception as e:
             print(f"[ERROR] Unexpected error parsing incoming text: {e}")
@@ -343,39 +359,23 @@ class LoRaListener:
                 print(f"[ERROR] Received packet of length {len(packet)}, should be 138")
                 return
 
-            utime, sender_id, _ = struct.unpack("!II", packet[2:10])
+            utime, sender_id = struct.unpack("!II", packet[2:10])
         
-            # Payload starts after the 13-byte header (or 14 if including retransmission/hop)
-            # Based on your previous struct.unpack("!BIII", packet[1:14]), header ends at 14
-            payload_bytes = packet[14:]
-            details_str = payload_bytes.decode('utf-8').strip('\x00')
-            
-            # Split the protocol format nick:name:phone
-            parts = details_str.split(':')
-            if len(parts) != 3:
-                print(f"[ERROR] Malformed user details string: '{details_str}'")
-                return
-
-            new_details = {
-                "nick": parts[0],
-                "name": parts[1],
-                "phone": parts[2],
-                "delay_secs": max(0, int(time.time()) - utime)
-            }
+            # Payload starts after the 10-byte header
+            payload_bytes = packet[10:]
 
             with users_lock:
                 if sender_id in users_registry:
-                    # User is known, update their details in the registry
-                    if [users_registry[sender_id][field] for field in ["nick", "name", "phone"]] == ["", "", ""]:
-                        lora_out_queues[3].put(packet)
+                    if [users_registry[sender_id].get(field, "") for field in ["nick", "name", "phone"]] == ["", "", ""]:
+                        lora_out_queues[3].put((int(time.time()), packet))
                     elif random.random() < PERIODIC_DETAILS_CHANCE:
-                            lora_out_queues[3].put(packet)
-                    users_registry[sender_id].update(new_details)
-                    print(f"[DEBUG] Updated registry for known user {sender_id}")
+                            lora_out_queues[3].put((int(time.time()), packet))
+                    LoRaListener.register_user(sender_id, payload_bytes, int(time.time() - utime))
                 else:
+                    lora_out_queues[3].put((time.time(), packet))
                     # User unknown, cache details in the "Waiting Room"
                     with cached_details_lock:
-                        cached_user_details[sender_id] = new_details
+                        cached_user_details[sender_id] = (payload_bytes, int(time.time() - utime))
                     print(f"[DEBUG] Cached details for unknown user {sender_id}")
         except Exception as e:
             print(f"[ERROR] Unexpected error parsing incoming user details: {e}")
@@ -484,7 +484,7 @@ class LoRaWriter:
                     print(f"[DEBUG] Key for {sender_key_id} already in queue. Skipping.")
                     return False
         
-            lora_out_queues[priority].put((time.time(), packet, sender_key_id), block = False) #change later
+            lora_out_queues[priority].put((time.time(), packet, sender_key_id), block = False) #TODO change later
             with pending_keys_lock:
                 pending_keys.add(sender_key_id)
             print(f"[DEBUG] Key Publish packet for ID {sender_key_id} added to queue.")
@@ -495,25 +495,21 @@ class LoRaWriter:
             return False
         
     @staticmethod
-    def publish_user_details(user_data : dict):
+    def publish_user_details(key_id : int, encrypted_info : bytes):
         """
         User details creates a binary packet and sends it to the lora worker.
         user_data: dict which includes key_id, nick, name, phone
         """
         try:
-            # Payload creation: joining with a colon
-            # nick:name:phone
-            details_str = f"{user_data.get('nick','')}:{user_data.get('name','')}:{user_data.get('phone','')}"
-            details_bytes = details_str.encode('utf-8')
             # Packing by the LoRa text protocol format
             header = struct.pack('!BBII', 
                                 0xAE, 
                                 0x02, 
                                 int(time.time()), 
-                                user_data['key_id'])
-            full_packet = header + details_bytes
-            lora_out_queues[5].put((time.time(), full_packet), block = False)
-            print(f"User Details for {user_data['key_id']} queued.")
+                                key_id)
+            full_packet = header + encrypted_info
+            lora_out_queues[4].put((time.time(), full_packet), block = False)
+            print(f"User Details for {key_id} queued.")
         except Exception as e:
             print(f"[ERROR] Error publishing user details: {e}")
 
@@ -524,10 +520,10 @@ class LoRaWriter:
             return 1, lora_out_queues[1].get()
         elif r < WFQ_PRIORITY_WEIGHTS[1] and not lora_out_queues[2].empty():
             return 2, lora_out_queues[2].get()
-        elif r < WFQ_PRIORITY_WEIGHTS[2] and not lora_out_queues[4].empty():
-            return 3, lora_out_queues[4].get()
-        elif not lora_out_queues[5].empty():
-            return 4, lora_out_queues[5].get()
+        elif r < WFQ_PRIORITY_WEIGHTS[2] and not lora_out_queues[3].empty():
+            return 3, lora_out_queues[3].get()
+        elif not lora_out_queues[4].empty():
+            return 4, lora_out_queues[4].get()
         
         for p in [1, 2, 3, 4]:
             if not lora_out_queues[p].empty():
@@ -547,6 +543,8 @@ class LoRaWriter:
 
                 while True:
                     priority, item = LoRaWriter.get_next_packet_wfq()
+                    if priority is None:
+                        continue
                     print("[DEBUG] worker got a message")
                     if isinstance(item[1], bytes):
                         raw_bytes = item[1]
@@ -576,6 +574,6 @@ if __name__ == '__main__':
     parser.add_argument("--url", type=str, default='127.0.0.1',
                         help="url to run the REST API server on (default: 127.0.0.1)")
     args = parser.parse_args()
-    # threading.Thread(target=LoRaListener.lora_recieve_loop, args=(args.device,), daemon=True).start()
-    # threading.Thread(target=LoRaWriter.lora_worker, args=(args.device,), daemon=True).start()
+    threading.Thread(target=LoRaListener.lora_recieve_loop, args=(args.device,), daemon=True).start()
+    threading.Thread(target=LoRaWriter.lora_worker, args=(args.device,), daemon=True).start()
     app.run(host=args.url, port=args.port)

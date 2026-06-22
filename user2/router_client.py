@@ -20,7 +20,7 @@ INPUT_COMMAND_DELAY = 2.5
 DEFAULT_INTERVAL = 30
 REMOTE_SYNC_INTERVAL = 10
 SIM_LOOP_DELAY = 1
-ROUTER_URL = "http://192.168.137.160"
+ROUTER_URL = "http://localhost:8200"
 COORDINATOR_URL = "http://34.165.8.95:8080"  # Franji's Google cloud node 2025-04-16
 # use http://34.165.8.95:8080/coordinator_stats to check stats
 
@@ -120,7 +120,7 @@ def read_line(user : UserState, local_users, remote_users):
         elif text.strip().upper() == "USERS":
             print("Known users:")
             print("\n".join(f"local - key id: {u.key_id}, nickname: {u.nickname}, full name: {u.fullname}, phone: {u.phone}" for u in local_users))
-            print("\n".join(f"remote - key id: {u['key_id']}, nickname: {u['nick']}, full name: {u['name']}, phone: {u['phone']}, delay: {u['delay_secs']}" for u in remote_users.values()))
+            print("\n".join(f"remote - key id: {u['key_id']}, nickname: {u.get('nickname')}, full name: {u.get('fullname')}, phone: {u.get('phone')}, delay: {u['delay_secs']}" for u in remote_users.values()))
         else:
             print("[ERROR] Invalid command format. Please use '<target>#<message>' or '<detail>$<new_value>' or 'USERS'.")
         time.sleep(INPUT_COMMAND_DELAY)
@@ -259,7 +259,7 @@ class Simulator:
             sender_user.messages_by_seq[to_key_id][seq] = text
             text_bytes = text.encode('utf-8')
             payload = struct.pack("BBB", seq, sender_user.last_in_seq.get(to_key_id, 0), len(text_bytes)) + text_bytes
-            print(f"[DEBUG] len is {len(payload)} payload is {payload}")
+            
             data = {
                 'sender': sender_user.key_id,
                 'to': to_key_id,
@@ -273,14 +273,12 @@ class Simulator:
             else:
                 target_pub_key = RSA1024.from_public_bytes(base64.b64decode(target_info['key_b64']))
                 encrypted = target_pub_key.encrypt(payload)
-                print(f"[DEBUG] len is {len(encrypted)} encrypted is {encrypted}")
                 signed_encrypted = sender_user.key.decrypt(encrypted)
                 crypt2_b64 = base64.b64encode(signed_encrypted).decode('ascii')
                 data['crypt2_b64'] = crypt2_b64
                 payload_hash = hashlib.sha256(signed_encrypted).hexdigest()
-
-            if text != "":
-                print(f"[DEBUG] from {sender_user.key_id} to {to_key_id} sent {text}")
+            
+            print(f"[DEBUG] from {sender_user.key_id} to {to_key_id} sent {text}")
             r = requests.post(f"{self.url}/text", json=data, timeout=5)
             if r.status_code == 200:
                 if report and mid:
