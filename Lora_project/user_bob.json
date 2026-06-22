@@ -1,0 +1,25 @@
+{
+  "nickname": "bob",
+  "fullname": "bob",
+  "password": "b",
+  "phone": "055",
+  "private_key": "-----BEGIN RSA PRIVATE KEY-----\nMIICXAIBAAKBgQDC98HKgbLt7NGSM6NBXVLAb59f2Hbu5wHBjIMjsU9VUHGbjDnh\n5DeXWX/ZHCuSvwrM/hwJeNRxxjW3m9smXlphxNMLS4dWptdN5+baPuikfl9wykTl\nJG7hG3UNi3/yJHUI/kJEKDpV6S6l+i/b44N0lDJ8cHKaXyMTNwgYgXIVhQIDAQAB\nAoGAImTVF72WHFFa7hz0Z5dIPiDi32RfJMl1PpjkWINSwLTiecN8wYwCP42fF2SY\nDjjr9Zo9RXF+nryN5OBWgngCHu6qHkmTeQTIoW/LSv737tk9fgRs7wsjiX3wvOVE\nQO0tvTCLkf5xqhlxBfo3lZSXZfzAXRo4U9tvKCi3rVSxWbkCQQDOjBJVmji1MzLI\nkeOTGDf8GHVQsmCped4pWYhQO1jfTxGuOBSrfOmByccK1KXwT4ksQF9OIlyYyFC0\nE1KLXtepAkEA8aXzPOklT9QHiePBxXwkDao/ug27iBScs4Px0gOFmmfwNaUrJwg+\nU99P3qR94grhpKo8TGGLV1zd6ozJ+6mIfQJBAMshfKKNcrnZ6VbSC5NNXTnjv/Sm\nCWSDgxb9g48MXsH3nDbP1pw0090d2U/whGXLgudvQ4uvRYvIbX48BpEkrEkCQGun\nwBa507qdvoIK6s/df35rA5sS9SIp9KnxNXGXyhTBC34KyI/KF2JsUXviEob6zA39\nHYH1zwsrv134PSAWJk0CQBeQoHuvgnOf1qzAKtqLuNsT5ZS+6WcaUhZkJT5vTgo9\nrCVd9IeOzOiu0TMHLFnL0U/Ga13/Zr2C/mRVJO5Px7k=\n-----END RSA PRIVATE KEY-----",
+  "messages": [
+    {
+      "sender": 3271016906,
+      "to": 3039229122,
+      "text": "hey alice its me, bob"
+    },
+    {
+      "crypt2_b64": "asqZ7aZ15NpP3Zad10lgUgiqym4TKPqV0VrQx/WFXmkDLY6+Rcp++MfuJokBtIxXvQImiAYobPwtJlErdVvGgHJcCkbM5RBrQ43y3kQ1Ndvkado1UP+AexNTHyDSs2GOI1Svh+/5GF8b9tqRlwXXaky8F3siDyLEawd59vJJ+sY=",
+      "sender": 3039229122,
+      "to": 3271016906,
+      "utime": 1782057756,
+      "text": "hey bob"
+    }
+  ],
+  "last_seq": {
+    "3039229122": 1,
+    "3039229122": 3
+  }
+}

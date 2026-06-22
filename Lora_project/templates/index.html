@@ -1,0 +1,33 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Messenger Auth</title>
+</head>
+<style>
+    *{
+        font-size : 105%
+    }
+</style>
+<body>
+    <h1>CAT message</h1>
+    <h2>login page:</h2>
+
+    {% if message %}
+        <p style="color: red; font-weight: bold;">{{ message }}</p>
+    {% endif %}
+
+    <form method="POST">
+        <label for="fullname">Full Name:</label><br>
+        <input type="text" id="fullname" name="fullname" required><br><br>
+
+        <label for="password">Password:</label><br>
+        <input type="password" id="password" name="password" required><br><br>
+
+        <button type="submit" name="action" value="login">Log In</button>
+        <button type="submit" name="action" value="signup">Sign Up</button>
+    </form><br><br>
+    <img src = "static/shimi1.jpg" alt = "shimi1", style = "height: 30%; width: 30%">
+</body>
+</html>

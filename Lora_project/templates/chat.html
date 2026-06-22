@@ -1,0 +1,75 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Chat</title>
+    <style>
+        /* הגדרת גודל בסיסי לריבועי ההודעות */
+        .box {
+            padding: 10px;
+            margin: 10px 0;
+            border-radius: 5px;
+            width: fit-content;
+            max-width: 70%;
+        }
+        /* 1) הודעה שאני שלחתי: ריבוע ירוק, מוצמד לימין */
+        .my-message {
+            background-color: rgb(255, 0, 0);
+            margin-left: auto; /* דוחף את הריבוע לימין */
+        }
+        /* 1) הודעה שקיבלתי: ריבוע כחול, מוצמד לשמאל */
+        .their-message {
+            background-color: rgb(0,255,0);
+            margin-right: auto; /* דוחף את הריבוע לשמאל */
+        }
+    </style>
+</head>
+<body>
+
+    <h2>Chatting With:</h2>
+    <ul>
+        <li><strong>Full Name:</strong> {{ target_user.fullname }}</li>
+        <li><strong>Nickname:</strong> {{ target_user.nickname }}</li>
+        <li><strong>Key ID:</strong> {{ target_user.key_id }}</li>
+        <li><strong>Phone:</strong> {{ target_user.phone }}</li>
+    </ul>
+    
+    <hr>
+
+    {% if status_message %}
+        <p style="color: blue;"><b>Status:</b> {{ status_message }}</p>
+    {% endif %}
+
+    <div style="border: 1px solid black; padding: 20px; min-height: 200px; display: flex; flex-direction: column;">
+        
+        {% for msg in chat_history %}
+            
+            {% if (msg.sender == my_id and msg.to == target_user.key_id and len(msg.text) > 0) %}
+                
+                <div class="box my-message">
+                    {{ msg.text }}
+                </div>
+            {% elif (msg.sender == target_user.key_id and msg.to == my_id and len(msg.text) > 0) %}
+                <div class="box their-message">
+                    {{ msg.text }}
+                </div>
+            {% endif %}
+            
+        {% else %}
+            <p style="color: gray; text-align: center;">No messages yet. Say hello!</p>
+        {% endfor %}
+
+    </div>
+
+    <br>
+
+    <form method="POST">
+        <input type="text" name="message_text" placeholder="Write a message..." required size="50">
+        <button type="submit">Send Message</button>
+    </form>
+
+    <br><br>
+    <a href="/home">Go Back to Home</a>
+
+</body>
+</html>
