@@ -12,7 +12,7 @@
 
         <h3>Your Profile Details:</h3>
     <ul>
-        <li><strong>Your Key ID (Session):</strong> {{ session['user_key_id'] }}</li>
+        <li><strong>Your Key ID (Session):</strong> {{ session['key_id'] }}</li>
         <li><strong>Nickname:</strong> {{ current_user.nickname if current_user and current_user.nickname else 'N/A...' }}</li>
         <li><strong>Full Name:</strong> {{ current_user.fullname if current_user and current_user.fullname else 'N/A...' }}</li>
         <li><strong>Phone:</strong> {{ current_user.phone if current_user and current_user.phone else 'N/A...' }}</li>
@@ -23,18 +23,13 @@
     <h3>Update Your Profile Settings</h3>
     <form action="/update-profile" method="POST">
         <div>
-            <label for="fullname">Full Name:</label>
-            <input type="text" id="fullname" name="fullname" value="{{ current_user.fullname if current_user else '' }}">
-        </div>
-        <br>
-        <div>
             <label for="nickname">Nickname (Handle):</label>
-            <input type="text" id="nickname" name="nickname" value="{{ current_user.nickname if current_user else '' }}">
+            <input type="text" id="nickname" name="nickname" value="{{ current_user.nickname if current_user else 'N/A' }}">
         </div>
         <br>
         <div>
             <label for="phone">Phone Number:</label>
-            <input type="text" id="phone" name="phone" value="{{ current_user.phone if current_user else '' }}">
+            <input type="text" id="phone" name="phone" value="{{ current_user.phone if current_user else 'N/A' }}">
         </div>
         <br>
         <div>
@@ -78,8 +73,8 @@
                 </td>
 
                 <td>{{ user.key_id }}</td>
-                <td>{{ user.nickname }}</td>
-                <td>{{ user.fullname }}</td>
+                <td>{{ user.nick }}</td>
+                <td>{{ user.name }}</td>
                 <td>{{ user.phone }}</td>
                 
                 <td>
