@@ -44,12 +44,12 @@
         
         {% for msg in chat_history %}
             
-            {% if (msg.sender == my_id and msg.to == target_user.key_id and len(msg.text) > 0) %}
+            {% if (msg.sender == my_id and msg.to == target_user.key_id) %}
                 
                 <div class="box my-message">
                     {{ msg.text }}
                 </div>
-            {% elif (msg.sender == target_user.key_id and msg.to == my_id and len(msg.text) > 0) %}
+            {% elif (msg.sender == target_user.key_id and msg.to == my_id) %}
                 <div class="box their-message">
                     {{ msg.text }}
                 </div>
